@@ -2,7 +2,7 @@
 
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。Android 12 (API 31) 起系统已移除 PPTP 支持，本项目目标是在用户态恢复该能力。
 
-**当前版本：v0.0.1** — Native helper standalone（root + SELinux 可行性验证）
+**当前版本：v0.0.2** — Native helper standalone（root + SELinux 可行性验证）
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAPv2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -24,14 +24,15 @@ setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "wlan0", ...);
 
 | 版本 | 里程碑 |
 |---|---|
-| v0.0.1 ✅ | Native helper standalone（本版本） |
-| v0.0.2 | App ↔ helper UDS 桥 |
-| v0.0.3 | PPTP 控制通道 (TCP 1723) |
-| v0.0.4 | LCP 协商 |
-| v0.0.5 | PAP / MS-CHAPv2 认证 |
-| v0.0.6 | IPCP + VpnService TUN |
-| v0.0.7 | MPPE-128 stateless |
-| v0.0.8 | 多服务器互通测试 |
+| v0.0.1 ✅ | 项目骨架 + helper 源码 |
+| v0.0.2 ✅ | 修复 libsu 根权限检测时序（本版本） |
+| v0.0.3 | App ↔ helper UDS 桥 |
+| v0.0.4 | PPTP 控制通道 (TCP 1723) |
+| v0.0.5 | LCP 协商 |
+| v0.0.6 | PAP / MS-CHAPv2 认证 |
+| v0.0.7 | IPCP + VpnService TUN |
+| v0.0.8 | MPPE-128 stateless |
+| v0.0.9 | 多服务器互通测试 |
 | v0.1.0 | 生命周期 + UI 打磨 |
 
 ---
@@ -98,10 +99,12 @@ su
 
 1. 启动 app
 2. 点击 **检测 root + 原始 GRE socket** 按钮
-3. 出现：
-   - ✅ `raw GRE socket 已打开（已绑定 wlan0）` — 通过，v0.0.1 验收成功
-   - ❌ `失败：ERR socket 13 Permission denied` — SELinux 拦截，可能未在 magisk 域；尝试在 Magisk 设置中给本 app 授 root
-   - ❌ `未获得 root 权限` — libsu 未拿到 su，确认 Magisk 已授权
+3. **首次点击时 Magisk 应弹出授权请求**，点 Grant
+4. 结果分支：
+   - ✅ `raw GRE socket 已打开（已绑定 wlan0）` + 诊断（`id` / `getenforce` / `uname -r`） — 通过
+   - ❌ `失败：libsu 拿到的是非 root shell` — Magisk 没装或没授权，按 UI 提示排查
+   - ❌ `失败：ERR socket 13 Permission denied` — 已拿到 root 但 SELinux 拒绝 raw socket。说明本设备的 magisk 域策略过严，需要在 Magisk 中给本应用额外配置 `magiskpolicy --live` 规则或换 ROM
+   - ❌ `失败：ERR bindtodevice 19 No such device` — 接口名错（应用获取到了不存在的 iface 名）
 
 ---
 

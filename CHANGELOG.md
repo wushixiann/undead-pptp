@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.0.2] — 2026-05-19
+
+### Fixed
+- **修正 libsu 根权限检测时序错误**：`probe()` 之前用 `Shell.isAppGrantedRoot()` 做预检，但首次调用时 shell 尚未初始化、它返回 `null`，导致即便 Magisk 已授权也报"未获得 root 权限"。改为 `Shell.getShell()` 阻塞初始化（这一步才会触发 Magisk 弹授权框），随后用 `shell.isRoot` 做判定。
+
+### Added
+- 探测成功时回传诊断字符串：`id`、`getenforce`、`uname -r`，方便确认 SELinux 状态与内核版本
+- 探测失败时输出多步排查清单（Magisk 安装、授权状态、`su` 路径）
+- UI 主区域加 `verticalScroll` 以容纳更长的诊断文本
+
 ## [0.0.1] — 2026-05-19
 
 ### Added

@@ -1,5 +1,6 @@
-# Gradle
+# Gradle / Kotlin daemon
 .gradle/
+.kotlin/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 

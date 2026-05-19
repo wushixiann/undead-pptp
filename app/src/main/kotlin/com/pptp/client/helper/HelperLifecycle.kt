@@ -5,7 +5,7 @@ import com.topjohnwu.superuser.Shell
 import java.io.File
 
 sealed class ProbeResult {
-    data class Ok(val iface: String) : ProbeResult()
+    data class Ok(val iface: String, val diagnostic: String) : ProbeResult()
     data class Fail(val message: String) : ProbeResult()
 }
 
@@ -36,23 +36,47 @@ object HelperLifecycle {
     fun probe(context: Context, iface: String): ProbeResult {
         val path = helperBinaryPath(context)
         if (!File(path).exists()) {
-            return ProbeResult.Fail("helper 二进制不存在：$path（NDK 未配置或 APK 未打包 native lib）")
+            return ProbeResult.Fail("helper 二进制不存在：$path\n（NDK 未配置编译，或本机 ABI 与打包 ABI 不匹配）")
         }
-        if (Shell.isAppGrantedRoot() != true) {
-            return ProbeResult.Fail("未获得 root 权限（libsu 未授权）")
+
+        // Shell.getShell() blocks until the shell is initialized. On first call this
+        // is when libsu actually spawns `su` and Magisk shows its grant dialog.
+        // The previous code mistakenly used Shell.isAppGrantedRoot() which returns
+        // null before any shell exists, causing a spurious "not granted" error.
+        val shell: Shell = try {
+            Shell.getShell()
+        } catch (e: Throwable) {
+            return ProbeResult.Fail("无法启动 shell：${e.message ?: e.javaClass.simpleName}")
         }
+
+        if (!shell.isRoot) {
+            val idOut = Shell.cmd("id").exec().out.joinToString(" ").trim()
+            return ProbeResult.Fail(
+                buildString {
+                    append("libsu 拿到的是非 root shell。\n")
+                    append("id → $idOut\n")
+                    append("排查：\n")
+                    append("  1) Magisk 是否已安装并能成功打开?\n")
+                    append("  2) Magisk 设置→超级用户 里是否能看到本应用并已 Grant?\n")
+                    append("  3) `which su` 在 adb shell 中能否返回路径?")
+                },
+            )
+        }
+
         val cmd = buildString {
             append('"').append(path).append('"').append(' ')
             append("probe").append(' ')
             append(shellQuote(iface))
         }
         val result = Shell.cmd(cmd).exec()
-        val output = result.out.joinToString("\n").trim()
-        return if (result.code == 0 && output.startsWith("OK")) {
-            ProbeResult.Ok(iface)
+        val stdout = result.out.joinToString("\n").trim()
+        return if (result.code == 0 && stdout.startsWith("OK")) {
+            val uname = Shell.cmd("id; getenforce; uname -r").exec().out.joinToString(" | ").trim()
+            ProbeResult.Ok(iface, "root shell ✓\n$uname")
         } else {
-            val detail = if (output.isNotEmpty()) output else "exit code ${result.code}"
-            ProbeResult.Fail(detail)
+            ProbeResult.Fail(
+                if (stdout.isNotEmpty()) stdout else "helper exit=${result.code}（空输出）",
+            )
         }
     }
 
