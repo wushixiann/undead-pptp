@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PPTP 客户端</string>
+    <string name="version_label">版本</string>
+    <string name="milestone_label">里程碑</string>
+    <string name="milestone_v001">v0.0.1 — Native helper standalone（验证 root/SELinux）</string>
+    <string name="helper_check_button">检测 root + 原始 GRE socket</string>
+    <string name="helper_check_idle">尚未检测</string>
+    <string name="helper_check_running">检测中…</string>
+    <string name="helper_check_ok">✅ raw GRE socket 已打开（已绑定 %1$s）</string>
+    <string name="helper_check_fail">❌ 失败：%1$s</string>
+    <string name="helper_path_label">Helper 路径</string>
+</resources>
