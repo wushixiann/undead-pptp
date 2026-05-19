@@ -3,33 +3,51 @@ package com.pptp.client
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.pptp.client.helper.BridgeResult
 import com.pptp.client.helper.HelperLifecycle
+import com.pptp.client.helper.Ipv4
 import com.pptp.client.helper.ProbeResult
+import com.pptp.client.helper.UdsBridge
+import com.pptp.client.helper.UdsFrame
 import com.pptp.client.util.NetworkUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -39,7 +57,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Scaffold { inner ->
-                    ProbeScreen(inner)
+                    Screen(inner)
                 }
             }
         }
@@ -47,17 +65,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ProbeScreen(padding: PaddingValues) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var status by remember { mutableStateOf<String>(context.getString(R.string.helper_check_idle)) }
-    var running by remember { mutableStateOf(false) }
-    var helperPath by remember { mutableStateOf("") }
-
-    LaunchedEffect(Unit) {
-        helperPath = HelperLifecycle.helperBinaryPath(context)
-    }
-
+private fun Screen(padding: PaddingValues) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -67,34 +75,214 @@ private fun ProbeScreen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v001)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v003)}")
         Spacer(Modifier.height(16.dp))
-        Text("${stringResource(R.string.helper_path_label)}: $helperPath")
+
+        ProbeSection()
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider()
         Spacer(Modifier.height(16.dp))
+        BridgeSection()
+    }
+}
+
+@Composable
+private fun ProbeSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf(context.getString(R.string.helper_check_idle)) }
+    var running by remember { mutableStateOf(false) }
+    var helperPath by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        helperPath = HelperLifecycle.helperBinaryPath(context)
+    }
+
+    Text("① root + raw GRE socket 自检", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text("Helper: $helperPath", fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    Spacer(Modifier.height(8.dp))
+    Button(
+        enabled = !running,
+        onClick = {
+            running = true
+            status = context.getString(R.string.helper_check_running)
+            scope.launch {
+                val iface = NetworkUtil.activeUnderlayInterface(context) ?: "wlan0"
+                val result = withContext(Dispatchers.IO) {
+                    HelperLifecycle.probe(context, iface)
+                }
+                status = when (result) {
+                    is ProbeResult.Ok ->
+                        context.getString(R.string.helper_check_ok, result.iface) +
+                            "\n\n" + result.diagnostic
+                    is ProbeResult.Fail ->
+                        context.getString(R.string.helper_check_fail, result.message)
+                }
+                running = false
+            }
+        },
+    ) {
+        Text(stringResource(R.string.helper_check_button))
+    }
+    Spacer(Modifier.height(8.dp))
+    Text(status, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+}
+
+@Composable
+private fun BridgeSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var bridge by remember { mutableStateOf<UdsBridge?>(null) }
+    val state = bridge?.state?.collectAsState()?.value
+    var helperOutput by remember { mutableStateOf<String?>(null) }
+    var peerIp by remember { mutableStateOf("192.168.1.1") }
+    var txCount by remember { mutableStateOf(0) }
+    val rxLog = remember { mutableStateListOf<String>() }
+    var rxCount by remember { mutableStateOf(0) }
+    var rxJob by remember { mutableStateOf<Job?>(null) }
+    var working by remember { mutableStateOf(false) }
+    var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    Text("② Helper bridge（UDS 桥接 raw GRE socket）", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        "状态: ${state?.name ?: "未启动"}",
+        fontFamily = FontFamily.Monospace,
+        fontSize = 12.sp,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Button(
-            enabled = !running,
+            enabled = !working && bridge == null,
             onClick = {
-                running = true
-                status = context.getString(R.string.helper_check_running)
+                working = true
+                errorMsg = null
+                helperOutput = null
                 scope.launch {
                     val iface = NetworkUtil.activeUnderlayInterface(context) ?: "wlan0"
                     val result = withContext(Dispatchers.IO) {
-                        HelperLifecycle.probe(context, iface)
+                        HelperLifecycle.startBridge(
+                            context = context,
+                            iface = iface,
+                            onHelperExit = { code, out ->
+                                helperOutput = "helper exit=$code\n$out"
+                            },
+                        )
                     }
-                    status = when (result) {
-                        is ProbeResult.Ok ->
-                            context.getString(R.string.helper_check_ok, result.iface) +
-                                "\n\n" + result.diagnostic
-                        is ProbeResult.Fail ->
-                            context.getString(R.string.helper_check_fail, result.message)
+                    when (result) {
+                        is BridgeResult.Ok -> {
+                            bridge = result.bridge
+                            // Drain received frames into the rolling log.
+                            rxJob = scope.launch {
+                                result.bridge.received.consumeAsFlow().collect { f ->
+                                    rxCount++
+                                    val ts = System.currentTimeMillis() % 100_000
+                                    val hex = f.payload.take(16)
+                                        .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+                                    val line = "[$ts] ${Ipv4.format(f.peerIpv4)} " +
+                                        "len=${f.payload.size} ${hex}${if (f.payload.size > 16) "…" else ""}"
+                                    rxLog.add(0, line)
+                                    if (rxLog.size > 20) rxLog.removeAt(rxLog.lastIndex)
+                                }
+                            }
+                        }
+                        is BridgeResult.Fail -> errorMsg = result.message
                     }
-                    running = false
+                    working = false
                 }
             },
-        ) {
-            Text(stringResource(R.string.helper_check_button))
-        }
-        Spacer(Modifier.height(16.dp))
-        Text(status)
+        ) { Text("启动 bridge") }
+
+        Spacer(Modifier.width(8.dp))
+
+        Button(
+            enabled = bridge != null,
+            onClick = {
+                bridge?.stop()
+                rxJob?.cancel()
+                rxJob = null
+                bridge = null
+                txCount = 0
+                rxCount = 0
+                rxLog.clear()
+            },
+        ) { Text("停止") }
     }
+
+    if (state == UdsBridge.State.Connected) {
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = peerIp,
+            onValueChange = { peerIp = it.trim() },
+            label = { Text("测试目标 IP") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    try {
+                        val frame = buildTestGreFrame(peerIp)
+                        bridge?.send(frame)
+                        txCount++
+                    } catch (e: Throwable) {
+                        errorMsg = "send 失败：${e.message}"
+                    }
+                },
+            ) { Text("发送测试 GRE 包") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "TX: $txCount   RX: $rxCount",
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+
+    errorMsg?.let {
+        Spacer(Modifier.height(8.dp))
+        Text(it, color = Color.Red, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    }
+
+    helperOutput?.let {
+        Spacer(Modifier.height(8.dp))
+        Text("helper 输出:", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color.DarkGray)
+    }
+
+    if (rxLog.isNotEmpty()) {
+        Spacer(Modifier.height(12.dp))
+        Text("RX 日志（最近 20 条，新→旧）:", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        rxLog.forEach { line ->
+            Text(line, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        }
+    }
+}
+
+/**
+ * Build a 12-byte minimal PPTP-style GRE frame (no real PPP payload). The
+ * receiver won't honor it as PPTP, but it's a well-formed GRE packet that
+ * tcpdump can recognize, sufficient to prove the app → helper → kernel
+ * raw-socket → wire path works end-to-end.
+ *
+ * Header layout (RFC 2637 §4.1):
+ *   byte 0: K=1, others 0  → 0x20
+ *   byte 1: Ver=1          → 0x01
+ *   byte 2-3: Protocol 0x880B (PPP)
+ *   byte 4-5: Key high = payload length (4)
+ *   byte 6-7: Key low  = Call ID (1)
+ *   byte 8-11: "TEST"
+ */
+private fun buildTestGreFrame(peerIpDotted: String): UdsFrame {
+    val peer = Ipv4.parse(peerIpDotted)
+    val payload = byteArrayOf(
+        0x20, 0x01, 0x88.toByte(), 0x0B,
+        0x00, 0x04, 0x00, 0x01,
+        'T'.code.toByte(), 'E'.code.toByte(), 'S'.code.toByte(), 'T'.code.toByte(),
+    )
+    return UdsFrame(peer, payload)
 }

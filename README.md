@@ -2,7 +2,7 @@
 
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。Android 12 (API 31) 起系统已移除 PPTP 支持，本项目目标是在用户态恢复该能力。
 
-**当前版本：v0.0.2** — Native helper standalone（root + SELinux 可行性验证）
+**当前版本：v0.0.3** — App ↔ Helper UDS 桥
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAPv2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -25,8 +25,8 @@ setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "wlan0", ...);
 | 版本 | 里程碑 |
 |---|---|
 | v0.0.1 ✅ | 项目骨架 + helper 源码 |
-| v0.0.2 ✅ | 修复 libsu 根权限检测时序（本版本） |
-| v0.0.3 | App ↔ helper UDS 桥 |
+| v0.0.2 ✅ | 修复 libsu 根权限检测时序 |
+| v0.0.3 ✅ | App ↔ helper UDS 桥（本版本） |
 | v0.0.4 | PPTP 控制通道 (TCP 1723) |
 | v0.0.5 | LCP 协商 |
 | v0.0.6 | PAP / MS-CHAPv2 认证 |
@@ -95,16 +95,32 @@ su
 # helper stderr 应打印来源 IP + 包内容前 32 字节
 ```
 
-### App 内测试（推荐）
+### App 内测试
+
+#### ① root + raw GRE 自检（v0.0.1/v0.0.2 验证项）
 
 1. 启动 app
 2. 点击 **检测 root + 原始 GRE socket** 按钮
 3. **首次点击时 Magisk 应弹出授权请求**，点 Grant
-4. 结果分支：
-   - ✅ `raw GRE socket 已打开（已绑定 wlan0）` + 诊断（`id` / `getenforce` / `uname -r`） — 通过
-   - ❌ `失败：libsu 拿到的是非 root shell` — Magisk 没装或没授权，按 UI 提示排查
-   - ❌ `失败：ERR socket 13 Permission denied` — 已拿到 root 但 SELinux 拒绝 raw socket。说明本设备的 magisk 域策略过严，需要在 Magisk 中给本应用额外配置 `magiskpolicy --live` 规则或换 ROM
-   - ❌ `失败：ERR bindtodevice 19 No such device` — 接口名错（应用获取到了不存在的 iface 名）
+4. 期望：`raw GRE socket 已打开（已绑定 wlan0）` + 诊断行
+
+#### ② UDS bridge 测试（v0.0.3 新增）
+
+前置：① 通过。
+
+1. 在网内准备一台测试机（Linux/Mac），运行 `sudo tcpdump -i any -nn proto gre`
+2. 点击 **启动 bridge**，状态应从 `WaitingForHelper` → `Connected`
+3. **测试目标 IP** 填入测试机的内网 IP
+4. 点击 **发送测试 GRE 包**
+5. 期望：
+   - app 端 TX 计数 +1
+   - 测试机 tcpdump 看到一条 GRE 包，长度 12B（GRE header 8B + "TEST" 4B），proto = 0x880B
+6. 如果测试机回了一个 GRE 包（一般不会，但你可以手工发一个测试），app 的 RX 日志应该出现一行
+7. 点击 **停止**，状态变 `Stopped`，helper 退出（"helper exit=0"）
+
+如果状态卡在 `WaitingForHelper`：helper 未连入 UDS。
+- 可能 helper 启动失败（`ERR socket` / `ERR bindtodevice`）—— 检查 "helper 输出" 区显示的退出码与 stderr
+- 也可能抽象命名空间 socket 被 SELinux 拦截；后续版本会加文件系统 UDS 兜底
 
 ---
 

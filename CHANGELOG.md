@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.0.3] — 2026-05-19
+
+### Added
+- **Helper `bridge` 模式**：long-running 子进程，通过 AF_UNIX 与 app 做双向 IO
+  - 协议：`4B peer_ip + 2B length + N B payload`（big-endian），TX/RX 同一帧格式
+  - 用 `poll(2)` 多路复用 raw GRE socket 与 UDS
+  - 支持抽象命名空间（`@name`）与文件系统路径两种 UDS 形式
+  - app 关闭 UDS 时 helper 收到 EOF 自动退出
+- **Kotlin `UdsFrame` 编解码**：纯字节流，无外部依赖
+- **Kotlin `UdsBridge`**：包装 `LocalServerSocket`（抽象命名空间），用协程跑后台 RX/TX worker，把帧投递到 `Channel<UdsFrame>`
+- **Kotlin `HelperLifecycle.startBridge()`**：经 `Shell.cmd().submit()` 异步拉起 helper，阻塞等待 helper 连入 UDS（默认 5s 超时）
+- **UI bridge 测试区**：启动/停止按钮、目标 IP 输入、发送测试 GRE 包按钮、TX/RX 计数、RX 日志（滚动 20 条）
+
+### Known Limits
+- libsu 单 shell 限制：bridge 运行期间无法并发跑其他 `Shell.cmd()` 调用（足够 v0.0.3 但 v0.0.7+ 上 VpnService 时需要切到 RootService 或独立 shell）
+- 测试 GRE 包是裸 12 字节结构，不含 PPP payload，不会被任何 PPTP 服务器认可 —— 仅用于验证 "字节进 helper → 字节出网卡" 的链路
+- 用了抽象命名空间 UDS（`@pptp_bridge_<hex>`）。如果某些定制 ROM 的 SELinux 拒绝 magisk↔untrusted_app 抽象 socket 互通，会回退到文件系统路径（已在 helper C 侧支持，Kotlin 侧待加）
+
 ## [0.0.2] — 2026-05-19
 
 ### Fixed
