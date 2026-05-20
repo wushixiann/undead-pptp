@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+## [0.0.5] — 2026-05-20
+
+### Added
+- **PPP 帧层** (`ppp/PppFrame.kt`)：HDLC-less 编解码（RFC 2637 §4.1），发送侧默认带 `FF 03` 前缀，接收侧兼容 ACFC（去前缀）与 PFC（单字节协议号）两种压缩形式
+- **PPTP-GRE 封装层** (`pptp/GreFrame.kt`)：Enhanced GRE（K=1, Ver=1, 协议 0x880B），可选 S/A 字段；含 `stripIpv4()` 用于从 raw socket 收到的完整 IPv4 包里剥出 GRE 字节
+- **LCP 协议** (`ppp/Lcp.kt`)：
+  - `LcpCode`、`LcpOptionType`、`AuthProto` 常量
+  - `LcpCodec`：包/选项的 ByteBuffer 编解码 + MRU/Magic-Number/Auth-Protocol 选项构造器
+  - `AuthChoice` 枚举：PAP / MsChapV2 / MsChapV1 / Unknown
+- **LCP 状态机** (`ppp/LcpStateMachine.kt`)：
+  - 简化的 RFC 1661 §4.1 自动机：Initial → ReqSent → AckRcvd / AckSent → Opened
+  - 主动 opener：发 ConfigureRequest（MRU=1400 + Magic-Number）
+  - 协商策略：对端 MRU/Auth-Protocol/Magic/PFC/ACFC/ACCM 接受；MS-CHAP-V1 被 Nak 改为 MS-CHAP-V2；其余 Reject
+  - 重传：3s 超时、最多 10 次，超出关闭
+  - Echo-Request → Echo-Reply（含双向 Magic-Number 处理）
+- **会话编排** (`pptp/PptpSession.kt`)：
+  - 阶段机：Idle → ControlConnecting → CallSetup → BridgeStarting → LcpNegotiating → LcpOpen → Disconnecting → Closed/Failed
+  - 自动解析服务器主机名为 IPv4（helper 需要目标地址做 sendto）
+  - 把 helper bridge 的 RX 流 (`UdsBridge.received`) 接入 GRE→PPP→LCP 分发管线
+  - 任一层失败统一 teardown
+- **UI 第 ④ 区**：服务器/端口输入 + 「一键连接」/「断开」按钮 + 实时 phase / LCP state / Call-IDs / 错误显示；LCP Opened 时显示绿色验收提示
+
+### Notes
+- v0.0.5 终点：LCP 到 Opened。**没有**实际认证 → 大多数 PPTP 服务器会在认证阶段超时后断开。这是预期的。
+- 服务器要求的认证类型（PAP 或 MS-CHAP-V2）已通过 `negotiatedAuth` 暴露，v0.0.6 会据此分支
+- 已知简化：ConfigureNak 时不重新随机 Magic-Number；ConfigureReject 直接放弃；GRE seq/ack 仅做单向递增/最大值跟踪（未实现滑窗）
+
 ## [0.0.4] — 2026-05-20
 
 ### Added

@@ -2,7 +2,7 @@
 
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。Android 12 (API 31) 起系统已移除 PPTP 支持，本项目目标是在用户态恢复该能力。
 
-**当前版本：v0.0.4** — PPTP TCP 1723 控制通道
+**当前版本：v0.0.5** — PPP/LCP 协商（GRE 数据面打通）
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAPv2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -27,8 +27,8 @@ setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "wlan0", ...);
 | v0.0.1 ✅ | 项目骨架 + helper 源码 |
 | v0.0.2 ✅ | 修复 libsu 根权限检测时序 |
 | v0.0.3 ✅ | App ↔ helper UDS 桥 |
-| v0.0.4 ✅ | PPTP 控制通道 (TCP 1723) — 本版本 |
-| v0.0.5 | LCP 协商 |
+| v0.0.4 ✅ | PPTP 控制通道 (TCP 1723) |
+| v0.0.5 ✅ | LCP 协商（GRE 数据面打通）— 本版本 |
 | v0.0.6 | PAP / MS-CHAPv2 认证 |
 | v0.0.7 | IPCP + VpnService TUN |
 | v0.0.8 | MPPE-128 stateless |
@@ -147,6 +147,23 @@ docker run -d --name pptpd --restart=unless-stopped --privileged --net=host \
 如果服务器主动断开或异常，"服务器事件日志" 会显示 CDN / WEN / SLI 消息。
 
 **注意**：v0.0.4 只到 CallUp 为止。PPP/MPPE/数据面要等 v0.0.5+。在 CallUp 状态下不会有 IP 流量。
+
+#### ④ 全栈一键连接（v0.0.5 新增）
+
+前置：① 通过；服务器可达。这一步把控制通道、helper bridge、LCP 三层串起来。
+
+1. 在 ④ 区填服务器 IP、端口
+2. 点 **一键连接** → 阶段会依次走：
+   - `ControlConnecting` → `CallSetup`：跟 v0.0.4 一样
+   - `BridgeStarting`：拉起 helper（自动用 ① 验证过的方式）
+   - `LcpNegotiating`：开始发 LCP ConfigureRequest，与服务器一来一回
+   - `LcpOpen`：LCP 协商完成 ✅
+3. 验收：UI 显示绿色 "LCP Opened — v0.0.5 验收通过"，同时 `auth=Pap` 或 `auth=MsChapV2`（服务器要求的认证类型）
+4. v0.0.5 到此停止 — **大多数服务器会在 LCP Open 后等几秒不见认证就主动断开**（CDN 或 LCP Terminate-Request 到达），UI 会切到 Failed 阶段并显示原因。这是预期行为，v0.0.6 加认证后即可继续
+
+调试小贴士：
+- 服务器侧 `tail -f /var/log/syslog` 或 accel-ppp 日志，能看到 "LCP layer started" / "LCP layer up" 等事件
+- 想看 GRE 抓包可在服务器侧 `tcpdump -i any -nn proto gre`
 
 ---
 

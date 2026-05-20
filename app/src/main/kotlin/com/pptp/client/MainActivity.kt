@@ -46,6 +46,8 @@ import com.pptp.client.helper.UdsBridge
 import com.pptp.client.helper.UdsFrame
 import com.pptp.client.pptp.ControlChannel
 import com.pptp.client.pptp.ControlMessage
+import com.pptp.client.pptp.PptpSession
+import com.pptp.client.ppp.LcpStateMachine
 import com.pptp.client.util.NetworkUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -77,7 +79,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v004)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v005)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()
@@ -89,6 +91,10 @@ private fun Screen(padding: PaddingValues) {
         HorizontalDivider()
         Spacer(Modifier.height(16.dp))
         ControlSection()
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+        SessionSection()
     }
 }
 
@@ -441,6 +447,108 @@ private fun ControlSection() {
         Text("服务器事件日志:", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(4.dp))
         asyncLog.forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
+    }
+}
+
+@Composable
+private fun SessionSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var session by remember { mutableStateOf<PptpSession?>(null) }
+    val phase = session?.phase?.collectAsState()?.value ?: PptpSession.Phase.Idle
+    val lastError = session?.lastError?.collectAsState()?.value
+    var server by remember { mutableStateOf("") }
+    var port by remember { mutableStateOf("1723") }
+    var working by remember { mutableStateOf(false) }
+
+    val lcpState = session?.lcpState() ?: LcpStateMachine.State.Initial
+    val auth = session?.negotiatedAuth()
+    val callSession = session?.controlChannel()?.session
+
+    Text("④ 全栈一键连接（控制通道 + helper + LCP）", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text("阶段: ${phase.name}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    Spacer(Modifier.height(4.dp))
+    Text("LCP: ${lcpState.name}${auth?.let { " · auth=${it.name}" } ?: ""}",
+        fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    Spacer(Modifier.height(8.dp))
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = server,
+            onValueChange = { server = it.trim() },
+            label = { Text("PPTP 服务器") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+            enabled = session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed),
+        )
+        Spacer(Modifier.width(8.dp))
+        OutlinedTextField(
+            value = port,
+            onValueChange = { port = it.trim() },
+            label = { Text("端口") },
+            singleLine = true,
+            modifier = Modifier.width(96.dp),
+            enabled = session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed),
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            enabled = !working && server.isNotEmpty() &&
+                (session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed)),
+            onClick = {
+                working = true
+                val s = PptpSession(context)
+                session = s
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            s.connect(server, port.toIntOrNull() ?: 1723)
+                        }
+                    } catch (_: Throwable) {
+                        // Errors surface via s.lastError; phase already → Failed.
+                    } finally {
+                        working = false
+                    }
+                }
+            },
+        ) { Text("一键连接") }
+
+        Button(
+            enabled = !working && session != null && phase !in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed, PptpSession.Phase.Idle),
+            onClick = {
+                working = true
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { session?.disconnect() }
+                    } finally {
+                        working = false
+                    }
+                }
+            },
+        ) { Text("断开") }
+    }
+
+    if (callSession != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Call-IDs: 本端=${callSession.localCallId} 服务器=${callSession.peerCallId}  " +
+                "GRE tx=${callSession.txCount()} rxSeq=${callSession.rxSeq()}",
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+        )
+    }
+    lastError?.let {
+        Spacer(Modifier.height(8.dp))
+        Text(it, color = Color.Red, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+    }
+    if (phase == PptpSession.Phase.LcpOpen) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "✅ LCP Opened — v0.0.5 验收通过。下一步 v0.0.6 加 PAP / MS-CHAP-V2 认证。",
+            fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1B5E20),
+        )
     }
 }
 
