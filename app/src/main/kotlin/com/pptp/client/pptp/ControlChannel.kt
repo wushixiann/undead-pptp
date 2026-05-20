@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class ControlChannel(
     private val echoIntervalMs: Long = 60_000,
     private val rpcTimeoutMs: Long = 8_000,
+    private val socketProtector: ((Socket) -> Unit)? = null,
 ) {
 
     enum class State { Idle, Connecting, WaitSccrp, Established, WaitOcrp, CallUp, Stopping, Closed }
@@ -96,6 +97,9 @@ class ControlChannel(
                 Socket().apply {
                     tcpNoDelay = true
                     keepAlive = true
+                    // Protect must be called BEFORE connect to prevent the
+                    // initial TCP handshake from looping through a (future) VPN.
+                    socketProtector?.invoke(this)
                     connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
                 }
             }

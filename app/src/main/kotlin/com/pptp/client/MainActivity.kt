@@ -1,8 +1,13 @@
 package com.pptp.client
 
+import android.app.Activity
+import android.content.Intent
+import android.net.VpnService
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -46,8 +51,7 @@ import com.pptp.client.helper.UdsBridge
 import com.pptp.client.helper.UdsFrame
 import com.pptp.client.pptp.ControlChannel
 import com.pptp.client.pptp.ControlMessage
-import com.pptp.client.pptp.PptpSession
-import com.pptp.client.ppp.LcpStateMachine
+import com.pptp.client.vpn.PptpVpnService
 import com.pptp.client.util.NetworkUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -79,7 +83,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v006)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v007)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()
@@ -453,140 +457,104 @@ private fun ControlSection() {
 @Composable
 private fun SessionSection() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var session by remember { mutableStateOf<PptpSession?>(null) }
-    val phase = session?.phase?.collectAsState()?.value ?: PptpSession.Phase.Idle
-    val lastError = session?.lastError?.collectAsState()?.value
-    val authMessage = session?.authMessage?.collectAsState()?.value
+    val state = PptpVpnService.observable.collectAsState().value
+
     var server by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("1723") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var working by remember { mutableStateOf(false) }
+    var pendingStart by remember { mutableStateOf(false) }
 
-    val lcpState = session?.lcpState() ?: LcpStateMachine.State.Initial
-    val auth = session?.negotiatedAuth()
-    val callSession = session?.controlChannel()?.session
-    val canEdit = session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed, PptpSession.Phase.Idle)
+    val running = state.connecting || state.tunUp || state.phase !in arrayOf("Idle", "Closed", "Failed")
+    val canEdit = !running
 
-    Text("④ 全栈一键连接（控制通道 + helper + LCP + 认证）",
+    fun sendStart() {
+        val intent = Intent(context, PptpVpnService::class.java).apply {
+            action = PptpVpnService.ACTION_START
+            putExtra(PptpVpnService.EXTRA_HOST, server)
+            putExtra(PptpVpnService.EXTRA_PORT, port.toIntOrNull() ?: 1723)
+            putExtra(PptpVpnService.EXTRA_USERNAME, username)
+            putExtra(PptpVpnService.EXTRA_PASSWORD, password)
+        }
+        context.startForegroundService(intent)
+    }
+
+    val prepareLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && pendingStart) {
+            sendStart()
+        }
+        pendingStart = false
+    }
+
+    Text("④ 完整 VPN（控制通道 + 认证 + IPCP + VpnService TUN）",
         style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
-    Text("阶段: ${phase.name}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-    Text("LCP: ${lcpState.name}${auth?.let { " · auth=${it.name}" } ?: ""}",
-        fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    Text("阶段: ${state.phase}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    if (state.localIp.isNotEmpty()) {
+        Text(
+            "TUN 已建立：本端 ${state.localIp}  对端 ${state.peerIp}",
+            fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1B5E20),
+        )
+    }
     Spacer(Modifier.height(8.dp))
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
-            value = server,
-            onValueChange = { server = it.trim() },
-            label = { Text("PPTP 服务器") },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-            enabled = canEdit,
+            value = server, onValueChange = { server = it.trim() },
+            label = { Text("PPTP 服务器") }, singleLine = true,
+            modifier = Modifier.weight(1f), enabled = canEdit,
         )
         Spacer(Modifier.width(8.dp))
         OutlinedTextField(
-            value = port,
-            onValueChange = { port = it.trim() },
-            label = { Text("端口") },
-            singleLine = true,
-            modifier = Modifier.width(96.dp),
-            enabled = canEdit,
+            value = port, onValueChange = { port = it.trim() },
+            label = { Text("端口") }, singleLine = true,
+            modifier = Modifier.width(96.dp), enabled = canEdit,
         )
     }
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
-        value = username,
-        onValueChange = { username = it },
-        label = { Text("用户名") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-        enabled = canEdit,
+        value = username, onValueChange = { username = it },
+        label = { Text("用户名") }, singleLine = true,
+        modifier = Modifier.fillMaxWidth(), enabled = canEdit,
     )
     Spacer(Modifier.height(8.dp))
     OutlinedTextField(
-        value = password,
-        onValueChange = { password = it },
-        label = { Text("密码") },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth(),
-        enabled = canEdit,
+        value = password, onValueChange = { password = it },
+        label = { Text("密码") }, singleLine = true,
+        modifier = Modifier.fillMaxWidth(), enabled = canEdit,
     )
     Spacer(Modifier.height(8.dp))
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
-            enabled = !working && server.isNotEmpty() && username.isNotEmpty() && canEdit,
+            enabled = canEdit && server.isNotEmpty() && username.isNotEmpty(),
             onClick = {
-                working = true
-                val s = PptpSession(context)
-                session = s
-                scope.launch {
-                    try {
-                        withContext(Dispatchers.IO) {
-                            s.connect(server, port.toIntOrNull() ?: 1723, username, password)
-                        }
-                    } catch (_: Throwable) {
-                        // Errors surface via s.lastError; phase already → Failed.
-                    } finally {
-                        working = false
-                    }
+                val prepare = VpnService.prepare(context)
+                if (prepare != null) {
+                    pendingStart = true
+                    prepareLauncher.launch(prepare)
+                } else {
+                    sendStart()
                 }
             },
-        ) { Text("一键连接") }
+        ) { Text("连接 VPN") }
 
         Button(
-            enabled = !working && session != null && !canEdit,
+            enabled = running,
             onClick = {
-                working = true
-                scope.launch {
-                    try {
-                        withContext(Dispatchers.IO) { session?.disconnect() }
-                    } finally {
-                        working = false
-                    }
+                val intent = Intent(context, PptpVpnService::class.java).apply {
+                    action = PptpVpnService.ACTION_STOP
                 }
+                context.startService(intent)
             },
         ) { Text("断开") }
     }
 
-    if (callSession != null) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Call-IDs: 本端=${callSession.localCallId} 服务器=${callSession.peerCallId}  " +
-                "GRE tx=${callSession.txCount()} rxSeq=${callSession.rxSeq()}",
-            fontFamily = FontFamily.Monospace, fontSize = 11.sp,
-        )
-    }
-    val mppe = session?.mppeKeys
-    if (mppe != null) {
-        Text(
-            "MPPE master key 已派生 (${mppe.masterKey.size}B) — v0.0.8 启用加密",
-            fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color(0xFF1565C0),
-        )
-    }
-    authMessage?.let {
-        Spacer(Modifier.height(8.dp))
-        Text("Auth: $it", fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-    }
-    lastError?.let {
+    state.lastError?.let {
         Spacer(Modifier.height(8.dp))
         Text(it, color = Color.Red, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-    }
-    if (phase == PptpSession.Phase.Authenticated) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "✅ Authenticated — v0.0.6 验收通过。下一步 v0.0.7 加 IPCP + VpnService TUN。",
-            fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1B5E20),
-        )
-    } else if (phase == PptpSession.Phase.LcpOpen) {
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "LCP Opened — 等待启动认证…",
-            fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1565C0),
-        )
     }
 }
 

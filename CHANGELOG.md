@@ -4,6 +4,47 @@
 
 ## [Unreleased]
 
+## [0.0.7] — 2026-05-20
+
+### Added
+- **IPCP 状态机** (`ppp/IpcpStateMachine.kt`) — RFC 1332
+  - 与 LCP 同形的 7 状态自动机，复用 LcpPacket/LcpCodec 编解码（IPCP 包结构与 LCP 完全相同，只是选项语义不同）
+  - 选项：IP-Address (3), Primary-DNS (129), Secondary-DNS (131)
+  - 我方初始 ConfReq 全填 0.0.0.0 → 服务器 Nak 时采纳建议值再发 → 服务器 Ack → Opened
+  - 对端 ConfReq 直接接受（服务器侧 IP）
+- **VpnService 子类** (`vpn/PptpVpnService.kt`)
+  - `BIND_VPN_SERVICE` 系统服务，前台 specialUse 类型
+  - 接收 `ACTION_START` Intent 携带 host/port/user/password
+  - 内部持有 PptpSession + TunPipe
+  - IPCP Opened 回调里用 `VpnService.Builder` 建立 TUN：
+    - `setMtu(1400)` `addAddress(localIp/32)` `addRoute(0.0.0.0/0)`
+    - addDnsServer × 主备 DNS
+    - `setConfigureIntent` 跳回 MainActivity
+  - 暴露 `State` StateFlow 给 UI 观察（phase / localIp / peerIp / lastError）
+  - `onRevoke()`：系统侧（设置 → VPN → 断开）触发优雅退出
+- **前台通知** (`vpn/ForegroundNotification.kt`)
+  - Android 8+ NotificationChannel `pptp_vpn`，importance LOW
+  - 通知点击跳回 MainActivity
+  - Title/body 随 phase 变化（连接中 / 已连接 / IP=…）
+- **TunPipe** (`vpn/TunPipe.kt`)
+  - 后台协程读 TUN fd（阻塞 FileInputStream）→ 调 `session.sendIpv4(packet)`
+  - `deliver(packet)` 把收到的 PPP IPv4 写回 TUN fd
+  - 只处理 IPv4（首字节高 4 位 = 0x4），跳过 IPv6（未来 IPCPv6 处理）
+- **PptpSession 扩展**：
+  - 构造函数加 `socketProtector` 和 `onIpcpOpened` 回调
+  - 阶段新增 Authenticated → IpcpNegotiating → IpcpOpen → Connected
+  - 认证成功后自动 startIpcp()
+  - 新 `bindTun()` 把 TUN 投递回调注入；从此 PPP IPv4 帧被转给 TUN
+  - 新 `sendIpv4()` 给 TunPipe 调用，对应方向 TUN → wire
+- **ControlChannel**：socketProtector 在 connect 之前调用，避免 TCP 握手包穿入 VPN
+- **AndroidManifest**：注册 PptpVpnService，附 `BIND_VPN_SERVICE` 权限、specialUse 类型、`PROPERTY_SPECIAL_USE_FGS_SUBTYPE` 说明
+- UI 第 ④ 区：用 VpnService.prepare() 获取系统授权后再 startForegroundService；连接/断开都通过 Intent；状态来自 `PptpVpnService.observable` 而非直接绑定 PptpSession
+
+### Known Limits (v0.0.7)
+- **未启用 MPPE/CCP**：accel-ppp / Windows RRAS 默认强制 MPPE，会在 IPCP 后立刻 TermReq。测试 v0.0.7 时必须把服务器配置改成 `mppe=no required` 或 `--require-mppe=no`。v0.0.8 加 MPPE 后此限制解除
+- **底层网络切换不重连**：WiFi↔4G 切换会断开（v0.1.0 处理）
+- **POST_NOTIFICATIONS 用户拒绝时通知不显示**，但服务仍可运行（API 33+ 行为）
+
 ## [0.0.6] — 2026-05-20
 
 ### Added

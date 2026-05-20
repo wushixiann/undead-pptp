@@ -7,8 +7,8 @@ import com.pptp.client.helper.HelperLifecycle
 import com.pptp.client.helper.UdsBridge
 import com.pptp.client.helper.UdsFrame
 import com.pptp.client.ppp.AuthChoice
+import com.pptp.client.ppp.IpcpStateMachine
 import com.pptp.client.ppp.LcpCodec
-import com.pptp.client.ppp.LcpPacket
 import com.pptp.client.ppp.LcpStateMachine
 import com.pptp.client.ppp.MppeKeyMaterial
 import com.pptp.client.ppp.MsChapV2Auth
@@ -30,22 +30,32 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.InetAddress
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * End-to-end orchestrator that brings the layered stack up:
+ * End-to-end orchestrator for the PPTP stack.
  *
- *   ① ControlChannel : TCP 1723 → SCCRQ/SCCRP → OCRQ/OCRP → Call-IDs known
- *   ② HelperLifecycle: spawn root helper, open UDS bridge for GRE I/O
- *   ③ LCP            : run the PPP link-layer negotiation to Opened
- *   ④ Auth           : PAP or MS-CHAP-V2 (whichever LCP negotiated)
- *
- * v0.0.6 stops at step ④ (Authenticated). IPCP + VpnService TUN come in
- * v0.0.7, CCP/MPPE in v0.0.8. The orchestrator owns *all* lifecycle for
- * the call: a single [disconnect] tears down every layer cleanly.
+ *   Phases  ── Stage ─────────────────────────────────────────────────
+ *   Idle
+ *   ControlConnecting ── TCP 1723 connect (with optional socketProtector)
+ *   CallSetup         ── SCCRQ/SCCRP → OCRQ/OCRP
+ *   BridgeStarting    ── spawn root helper, accept UDS
+ *   LcpNegotiating    ── PPP LCP up
+ *   LcpOpen           ── LCP Opened, auth not started yet
+ *   Authenticating    ── PAP / MS-CHAP-V2 in flight
+ *   Authenticated     ── auth OK; mppeKeys populated for MS-CHAP-V2
+ *   IpcpNegotiating   ── IPCP up; once Opened we invoke onIpcpOpened()
+ *   IpcpOpen          ── IP/DNS assigned; caller (VpnService) builds TUN
+ *   Connected         ── TUN bound via [bindTun]; IP traffic flowing
+ *   Disconnecting / Closed / Failed
  */
-class PptpSession(private val context: Context) {
+class PptpSession(
+    private val context: Context,
+    private val socketProtector: ((Socket) -> Unit)? = null,
+    private val onIpcpOpened: ((IpcpStateMachine.LocalConfig, IpcpStateMachine.PeerConfig) -> Unit)? = null,
+) {
 
     enum class Phase {
         Idle,
@@ -56,6 +66,9 @@ class PptpSession(private val context: Context) {
         LcpOpen,
         Authenticating,
         Authenticated,
+        IpcpNegotiating,
+        IpcpOpen,
+        Connected,
         Disconnecting,
         Closed,
         Failed,
@@ -75,6 +88,7 @@ class PptpSession(private val context: Context) {
     private var control: ControlChannel? = null
     private var bridge: UdsBridge? = null
     private var lcp: LcpStateMachine? = null
+    private var ipcp: IpcpStateMachine? = null
     private var session: SessionState? = null
     private var peerIpv4Int: Int = 0
     private var rxJob: Job? = null
@@ -82,18 +96,37 @@ class PptpSession(private val context: Context) {
     private var papAuth: PapAuth? = null
     private var msChapAuth: MsChapV2Auth? = null
 
-    /** MPPE master-key material — populated only when MS-CHAP-V2 succeeds. */
+    /** Invoked when an IPv4 packet arrives from the wire (after IPCP open). */
+    @Volatile private var tunDeliver: ((ByteArray) -> Unit)? = null
+
     @Volatile var mppeKeys: MppeKeyMaterial? = null
         private set
 
     fun controlChannel(): ControlChannel? = control
     fun lcpState(): LcpStateMachine.State? = lcp?.state?.value
+    fun ipcpState(): IpcpStateMachine.State? = ipcp?.state?.value
     fun negotiatedAuth(): AuthChoice? = lcp?.negotiatedAuth
+    fun ipcpLocalConfig(): IpcpStateMachine.LocalConfig? = ipcp?.localConfig
+    fun ipcpPeerConfig(): IpcpStateMachine.PeerConfig? = ipcp?.peerConfig
 
     /**
-     * Bring the full PPTP stack up. Suspending; can be cancelled by calling
-     * [disconnect]. On any failure [_phase] settles to [Phase.Failed] and
-     * the underlying resources are torn down.
+     * Bind the TUN delivery callback after the caller (typically VpnService)
+     * has built the tun interface. From this moment IPv4 packets arriving from
+     * the wire are passed to [deliver], and phase becomes Connected.
+     */
+    fun bindTun(deliver: (ByteArray) -> Unit) {
+        tunDeliver = deliver
+        if (_phase.value == Phase.IpcpOpen) _phase.value = Phase.Connected
+    }
+
+    /** Send an outbound IPv4 packet (called by TunPipe). */
+    fun sendIpv4(packet: ByteArray) {
+        val s = session ?: return
+        sendPpp(PppProtocol.IPV4, packet, s)
+    }
+
+    /**
+     * Bring the full PPTP stack up. On failure [_phase] settles to [Phase.Failed].
      */
     suspend fun connect(
         host: String,
@@ -108,9 +141,8 @@ class PptpSession(private val context: Context) {
         _authMessage.value = null
         mppeKeys = null
 
-        // Stage ①: control channel + outgoing call.
         _phase.value = Phase.ControlConnecting
-        val cc = ControlChannel()
+        val cc = ControlChannel(socketProtector = socketProtector)
         control = cc
         try {
             cc.connect(host, port)
@@ -129,15 +161,14 @@ class PptpSession(private val context: Context) {
             fail("无法解析 $host 为 IPv4：${e.message}")
             return
         }
-        Log.i(TAG, "peer IPv4 resolved: ${ipFormat(peerIpv4Int)}; callIds local=${s.localCallId} peer=${s.peerCallId}")
+        Log.i(TAG, "peer IPv4=${ipFormat(peerIpv4Int)} callIds local=${s.localCallId} peer=${s.peerCallId}")
 
-        // Stage ②: helper bridge.
         _phase.value = Phase.BridgeStarting
         val iface = NetworkUtil.activeUnderlayInterface(context) ?: "wlan0"
         val br = when (val r = HelperLifecycle.startBridge(
             context, iface,
             onHelperExit = { code, out ->
-                Log.w(TAG, "helper exited code=$code out=$out")
+                Log.w(TAG, "helper exited code=$code")
                 if (_phase.value !in arrayOf(Phase.Disconnecting, Phase.Closed, Phase.Failed)) {
                     scope.launch { fail("helper 意外退出：code=$code\n$out") }
                 }
@@ -148,12 +179,9 @@ class PptpSession(private val context: Context) {
         }
         bridge = br
 
-        // Stage ③: hook bridge RX → PPP dispatcher, then start LCP.
         rxJob = scope.launch {
             try {
-                br.received.consumeAsFlow().collect { uds ->
-                    handleRx(uds, s)
-                }
+                br.received.consumeAsFlow().collect { uds -> handleRx(uds, s) }
             } catch (e: Throwable) {
                 Log.w(TAG, "rx loop ended", e)
             }
@@ -166,7 +194,6 @@ class PptpSession(private val context: Context) {
                 when (st) {
                     LcpStateMachine.State.Opened -> {
                         _phase.value = Phase.LcpOpen
-                        // Kick off auth as soon as LCP is up.
                         scope.launch { startAuth(username, password, s) }
                     }
                     LcpStateMachine.State.Closed -> {
@@ -177,9 +204,7 @@ class PptpSession(private val context: Context) {
                     else -> {}
                 }
             },
-            onAuthRequested = { auth ->
-                Log.i(TAG, "peer requested auth: $auth")
-            },
+            onAuthRequested = { auth -> Log.i(TAG, "peer requested auth: $auth") },
         )
         lcp = sm
         sm.open()
@@ -193,51 +218,66 @@ class PptpSession(private val context: Context) {
         when (auth) {
             AuthChoice.Pap -> {
                 val pap = PapAuth(
-                    username = username,
-                    password = password,
-                    sender = { payload -> sendPpp(PppProtocol.PAP, payload, s) },
+                    username, password,
+                    sender = { sendPpp(PppProtocol.PAP, it, s) },
                     onResult = { ok, msg ->
                         _authMessage.value = msg
-                        if (ok) {
-                            _phase.value = Phase.Authenticated
-                        } else {
-                            scope.launch { fail("PAP 认证失败: $msg") }
-                        }
+                        if (ok) onAuthOk(s) else scope.launch { fail("PAP 认证失败: $msg") }
                     },
                 )
-                papAuth = pap
-                pap.start()
+                papAuth = pap; pap.start()
             }
             AuthChoice.MsChapV2 -> {
                 val mc = MsChapV2Auth(
-                    username = username,
-                    password = password,
-                    sender = { payload -> sendPpp(PppProtocol.CHAP, payload, s) },
+                    username, password,
+                    sender = { sendPpp(PppProtocol.CHAP, it, s) },
                     onResult = { ok, msg, keys ->
                         _authMessage.value = msg
                         if (ok) {
                             mppeKeys = keys
-                            _phase.value = Phase.Authenticated
-                        } else {
-                            scope.launch { fail("MS-CHAPv2 认证失败: $msg") }
-                        }
+                            onAuthOk(s)
+                        } else scope.launch { fail("MS-CHAPv2 认证失败: $msg") }
                     },
                 )
-                msChapAuth = mc
-                mc.start()
+                msChapAuth = mc; mc.start()
             }
-            AuthChoice.MsChapV1, AuthChoice.Unknown -> {
-                scope.launch { fail("不支持的认证协议: $auth（仅 PAP 与 MS-CHAP-V2）") }
-            }
+            AuthChoice.MsChapV1, AuthChoice.Unknown ->
+                scope.launch { fail("不支持的认证协议: $auth") }
         }
+    }
+
+    private fun onAuthOk(s: SessionState) {
+        _phase.value = Phase.Authenticated
+        // Immediately drive IPCP. (In a real PPTP setup CCP may also start in parallel.)
+        startIpcp(s)
+    }
+
+    private fun startIpcp(s: SessionState) {
+        _phase.value = Phase.IpcpNegotiating
+        val sm = IpcpStateMachine(
+            sender = { packet -> sendPpp(PppProtocol.IPCP, LcpCodec.encodePacket(packet), s) },
+            onStateChange = { st ->
+                if (st == IpcpStateMachine.State.Opened) {
+                    _phase.value = Phase.IpcpOpen
+                    onIpcpOpened?.invoke(ipcp!!.localConfig, ipcp!!.peerConfig)
+                } else if (st == IpcpStateMachine.State.Closed) {
+                    if (_phase.value !in arrayOf(Phase.Disconnecting, Phase.Closed, Phase.Failed)) {
+                        scope.launch { fail("IPCP 异常关闭") }
+                    }
+                }
+            },
+        )
+        ipcp = sm
+        sm.open()
     }
 
     suspend fun disconnect() {
         if (_phase.value in arrayOf(Phase.Idle, Phase.Closed)) return
         _phase.value = Phase.Disconnecting
         try {
+            ipcp?.close()
             lcp?.close()
-            delay(300) // give TermReq a moment to flush
+            delay(300)
             control?.disconnect()
         } catch (_: Throwable) {}
         teardownNetwork()
@@ -257,11 +297,14 @@ class PptpSession(private val context: Context) {
         runCatching { bridge?.stop() }
         bridge = null
         runCatching { lcp?.shutdown() }
+        runCatching { ipcp?.shutdown() }
         lcp = null
+        ipcp = null
         papAuth = null
         msChapAuth = null
         control = null
         session = null
+        tunDeliver = null
     }
 
     // ----- PPP I/O -----
@@ -276,45 +319,32 @@ class PptpSession(private val context: Context) {
             sequence = s.nextTxSeq(),
             ack = ackVal,
         )
-        try {
-            br.send(UdsFrame(peerIpv4Int, greBytes))
-        } catch (e: Throwable) {
+        try { br.send(UdsFrame(peerIpv4Int, greBytes)) } catch (e: Throwable) {
             Log.w(TAG, "send via bridge failed", e)
         }
     }
 
     private fun handleRx(uds: UdsFrame, s: SessionState) {
         val greBytes = GreFrame.stripIpv4(uds.payload) ?: return
-        val gre = try {
-            GreFrame.decode(greBytes)
-        } catch (e: Throwable) {
-            Log.d(TAG, "ignoring malformed GRE: ${e.message}")
-            return
-        }
+        val gre = try { GreFrame.decode(greBytes) } catch (_: Throwable) { return }
         if (gre.callId != s.localCallId) return
         gre.sequence?.let { s.setRxSeq(it) }
         if (gre.payload.isEmpty()) return
 
-        val ppp = try {
-            PppFrame.decode(gre.payload)
-        } catch (e: Throwable) {
-            Log.d(TAG, "ignoring malformed PPP: ${e.message}")
-            return
-        }
+        val ppp = try { PppFrame.decode(gre.payload) } catch (_: Throwable) { return }
         when (ppp.protocol) {
             PppProtocol.LCP -> {
-                val pkt = try {
-                    LcpCodec.decodePacket(ppp.payload)
-                } catch (e: Throwable) {
-                    Log.w(TAG, "bad LCP packet", e); return
-                }
+                val pkt = try { LcpCodec.decodePacket(ppp.payload) } catch (_: Throwable) { return }
                 lcp?.onReceive(pkt)
             }
             PppProtocol.PAP -> papAuth?.onReceive(ppp.payload)
             PppProtocol.CHAP -> msChapAuth?.onReceive(ppp.payload)
-            else -> {
-                Log.d(TAG, "PPP protocol ${"0x%04x".format(ppp.protocol)} ignored at v0.0.6")
+            PppProtocol.IPCP -> {
+                val pkt = try { LcpCodec.decodePacket(ppp.payload) } catch (_: Throwable) { return }
+                ipcp?.onReceive(pkt)
             }
+            PppProtocol.IPV4 -> tunDeliver?.invoke(ppp.payload)
+            else -> Log.d(TAG, "PPP protocol ${"0x%04x".format(ppp.protocol)} ignored")
         }
     }
 
@@ -324,8 +354,7 @@ class PptpSession(private val context: Context) {
         fun resolveIpv4(host: String): Int {
             val addr = InetAddress.getAllByName(host).firstOrNull { it.address.size == 4 }
                 ?: throw IOException("$host has no IPv4 address")
-            val b = addr.address
-            return ByteBuffer.wrap(b).order(ByteOrder.BIG_ENDIAN).int
+            return ByteBuffer.wrap(addr.address).order(ByteOrder.BIG_ENDIAN).int
         }
 
         fun ipFormat(packed: Int): String =

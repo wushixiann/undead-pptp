@@ -30,6 +30,19 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".vpn.PptpVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VPN tunnel using a user-space PPTP implementation (Android 12+ removed system PPTP support)." />
+        </service>
+
     </application>
 
 </manifest>
