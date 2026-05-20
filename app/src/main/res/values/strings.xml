@@ -5,6 +5,7 @@
     <string name="milestone_label">里程碑</string>
     <string name="milestone_v001">v0.0.1 — Native helper standalone（验证 root/SELinux）</string>
     <string name="milestone_v003">v0.0.3 — App ↔ Helper UDS 桥</string>
+    <string name="milestone_v004">v0.0.4 — PPTP TCP 1723 控制通道</string>
     <string name="helper_check_button">检测 root + 原始 GRE socket</string>
     <string name="helper_check_idle">尚未检测</string>
     <string name="helper_check_running">检测中…</string>

@@ -44,6 +44,8 @@ import com.pptp.client.helper.Ipv4
 import com.pptp.client.helper.ProbeResult
 import com.pptp.client.helper.UdsBridge
 import com.pptp.client.helper.UdsFrame
+import com.pptp.client.pptp.ControlChannel
+import com.pptp.client.pptp.ControlMessage
 import com.pptp.client.util.NetworkUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -75,7 +77,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v003)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v004)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()
@@ -83,6 +85,10 @@ private fun Screen(padding: PaddingValues) {
         HorizontalDivider()
         Spacer(Modifier.height(16.dp))
         BridgeSection()
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+        ControlSection()
     }
 }
 
@@ -260,6 +266,181 @@ private fun BridgeSection() {
         rxLog.forEach { line ->
             Text(line, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
         }
+    }
+}
+
+@Composable
+private fun ControlSection() {
+    val scope = rememberCoroutineScope()
+    var channel by remember { mutableStateOf<ControlChannel?>(null) }
+    val state = channel?.state?.collectAsState()?.value ?: ControlChannel.State.Idle
+    val lastError = channel?.lastError?.collectAsState()?.value
+    val echoOk = channel?.echoSuccesses?.collectAsState()?.value ?: 0
+    val echoFail = channel?.echoFailures?.collectAsState()?.value ?: 0
+    var server by remember { mutableStateOf("") }
+    var port by remember { mutableStateOf("1723") }
+    var working by remember { mutableStateOf(false) }
+    var lastEvent by remember { mutableStateOf<String?>(null) }
+    val asyncLog = remember { mutableStateListOf<String>() }
+    var asyncJob by remember { mutableStateOf<Job?>(null) }
+
+    val session = channel?.session
+    val peerInfo = channel?.negotiatedPeerInfo
+
+    Text("③ PPTP 控制通道（TCP 1723）", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text("状态: ${state.name}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    Spacer(Modifier.height(8.dp))
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+            value = server,
+            onValueChange = { server = it.trim() },
+            label = { Text("服务器 IP / 域名") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+            enabled = channel == null,
+        )
+        Spacer(Modifier.width(8.dp))
+        OutlinedTextField(
+            value = port,
+            onValueChange = { port = it.trim() },
+            label = { Text("端口") },
+            singleLine = true,
+            modifier = Modifier.width(96.dp),
+            enabled = channel == null,
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            enabled = !working && channel == null && server.isNotEmpty(),
+            onClick = {
+                working = true
+                lastEvent = null
+                asyncLog.clear()
+                val cc = ControlChannel()
+                scope.launch {
+                    try {
+                        val reply = withContext(Dispatchers.IO) {
+                            cc.connect(server, port.toIntOrNull() ?: 1723)
+                        }
+                        channel = cc
+                        lastEvent = "SCCRP OK: host='${reply.hostName}' vendor='${reply.vendorString}'"
+                        asyncJob = scope.launch {
+                            try {
+                                cc.asyncEvents.consumeAsFlow().collect { ev ->
+                                    val line = when (ev) {
+                                        is ControlMessage.CallDisconnectNotify ->
+                                            "CDN: callId=${ev.callId} rc=${ev.resultCode} cause=${ev.causeCode}"
+                                        is ControlMessage.SetLinkInfo ->
+                                            "SLI: peer=${ev.peerCallId} sACCM=${ev.sendAccm.toString(16)} rACCM=${ev.recvAccm.toString(16)}"
+                                        is ControlMessage.WanErrorNotify ->
+                                            "WEN: peer=${ev.peerCallId} crc=${ev.crcErrors} fr=${ev.framingErrors}"
+                                        else -> "EV ${ev::class.simpleName}"
+                                    }
+                                    asyncLog.add(0, line)
+                                    if (asyncLog.size > 10) asyncLog.removeAt(asyncLog.lastIndex)
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    } catch (e: Throwable) {
+                        lastEvent = "连接失败：${e.message}"
+                        channel = null
+                    } finally {
+                        working = false
+                    }
+                }
+            },
+        ) { Text("连接") }
+
+        Button(
+            enabled = !working && state == ControlChannel.State.Established,
+            onClick = {
+                working = true
+                scope.launch {
+                    try {
+                        val reply = withContext(Dispatchers.IO) {
+                            channel!!.openCall()
+                        }
+                        lastEvent = "OCRP OK: serverCallId=${reply.callId} ourCallId=${reply.peerCallId} speed=${reply.connectSpeed}"
+                    } catch (e: Throwable) {
+                        lastEvent = "呼叫失败：${e.message}"
+                    } finally {
+                        working = false
+                    }
+                }
+            },
+        ) { Text("呼叫") }
+
+        Button(
+            enabled = !working && state in listOf(ControlChannel.State.Established, ControlChannel.State.CallUp),
+            onClick = {
+                working = true
+                scope.launch {
+                    try {
+                        val reply = withContext(Dispatchers.IO) { channel!!.ping() }
+                        lastEvent = if (reply != null)
+                            "Echo OK id=${reply.identifier}"
+                        else
+                            "Echo 超时"
+                    } finally {
+                        working = false
+                    }
+                }
+            },
+        ) { Text("Ping") }
+
+        Button(
+            enabled = !working && channel != null,
+            onClick = {
+                working = true
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { channel?.disconnect() }
+                    } finally {
+                        asyncJob?.cancel()
+                        asyncJob = null
+                        channel = null
+                        working = false
+                    }
+                }
+            },
+        ) { Text("断开") }
+    }
+
+    if (peerInfo != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "服务器: host='${peerInfo.hostName}' vendor='${peerInfo.vendorString}' " +
+                "framing=${"0x%x".format(peerInfo.framingCapabilities)}",
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+        )
+    }
+    if (session != null) {
+        Text(
+            "Call-IDs: 本端=${session.localCallId} 服务器=${session.peerCallId} 序号=${session.callSerialNumber}",
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+        )
+    }
+    Spacer(Modifier.height(4.dp))
+    Text("Echo: ok=$echoOk fail=$echoFail", fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+
+    lastEvent?.let {
+        Spacer(Modifier.height(8.dp))
+        Text(it, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    }
+    lastError?.let {
+        Spacer(Modifier.height(4.dp))
+        Text(it, color = Color.Red, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+    }
+
+    if (asyncLog.isNotEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        Text("服务器事件日志:", style = MaterialTheme.typography.titleSmall)
+        Spacer(Modifier.height(4.dp))
+        asyncLog.forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 11.sp) }
     }
 }
 

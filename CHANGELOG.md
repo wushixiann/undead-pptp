@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+## [0.0.4] — 2026-05-20
+
+### Added
+- **PPTP 控制通道（TCP 1723）完整实现** — RFC 2637 §2 / §3
+  - `ControlMessages.kt`：sealed hierarchy 覆盖 SCCRQ/SCCRP、StopCCRQ/StopCCRP、Echo-Request/Reply、OCRQ/OCRP、CDN、SLI、WEN（v0.0.4 客户端不接受 incoming call，故未含 ICRQ/ICRP/ICCN）
+  - `ControlCodec.kt`：基于 ByteBuffer 的纯字节编解码，big-endian；ASCII 字段 NUL 填充；包含 Magic Cookie 0x1A2B3C4D 校验、消息长度 sanity check
+  - `SessionState.kt`：每 call 独立的 16-bit Call-ID（SecureRandom 分配）+ GRE seq/ack 计数器（AtomicInteger，无锁）
+  - `ControlChannel.kt`：协程化状态机 `Idle → Connecting → WaitSccrp → Established → WaitOcrp → CallUp → Stopping → Closed`
+    - TCP 直连 + 8s 连接超时
+    - 阻塞 read 循环：socket close → IOException → 优雅 teardown
+    - RPC 模式（SCCRP/OCRP/StopCCRP）用 `CompletableDeferred` + `withTimeoutOrNull(8s)` 实现请求-应答
+    - 自动 Echo-Request 心跳（默认 60s 间隔），暴露 success/failure 计数
+    - 异步事件 `Channel<ControlMessage>` 投递 CDN/SLI/WEN 给 UI
+    - 服务器主动发 StopCCRQ 时自动回 StopCCRP 并 teardown
+- **UI 第 ③ 区**：服务器地址/端口输入、连接/呼叫/Ping/断开按钮、协商出的服务器 host/vendor、本端与服务器 Call-ID 显示、Echo 计数、服务器异步事件日志（滚动 10 条）
+
+### Notes
+- 控制通道与 helper 完全解耦：纯 TCP socket，不需 root，未来 VpnService 上线后用 `vpnService.protect(socket)` 防回环（v0.0.7 处理）
+- v0.0.4 完成后，呼叫到达 `CallUp` 即得到 server 端的 Call-ID；下一步 v0.0.5 在此基础上启动 PPP LCP 协商
+- 单元测试待补；目前依赖与真实服务器（accel-ppp / Windows RRAS / MikroTik）实测验证
+
 ## [0.0.3] — 2026-05-19
 
 ### Added

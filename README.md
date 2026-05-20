@@ -2,7 +2,7 @@
 
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。Android 12 (API 31) 起系统已移除 PPTP 支持，本项目目标是在用户态恢复该能力。
 
-**当前版本：v0.0.3** — App ↔ Helper UDS 桥
+**当前版本：v0.0.4** — PPTP TCP 1723 控制通道
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAPv2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -26,8 +26,8 @@ setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "wlan0", ...);
 |---|---|
 | v0.0.1 ✅ | 项目骨架 + helper 源码 |
 | v0.0.2 ✅ | 修复 libsu 根权限检测时序 |
-| v0.0.3 ✅ | App ↔ helper UDS 桥（本版本） |
-| v0.0.4 | PPTP 控制通道 (TCP 1723) |
+| v0.0.3 ✅ | App ↔ helper UDS 桥 |
+| v0.0.4 ✅ | PPTP 控制通道 (TCP 1723) — 本版本 |
 | v0.0.5 | LCP 协商 |
 | v0.0.6 | PAP / MS-CHAPv2 认证 |
 | v0.0.7 | IPCP + VpnService TUN |
@@ -121,6 +121,32 @@ su
 如果状态卡在 `WaitingForHelper`：helper 未连入 UDS。
 - 可能 helper 启动失败（`ERR socket` / `ERR bindtodevice`）—— 检查 "helper 输出" 区显示的退出码与 stderr
 - 也可能抽象命名空间 socket 被 SELinux 拦截；后续版本会加文件系统 UDS 兜底
+
+#### ③ PPTP 控制通道（v0.0.4 新增）
+
+前置：一台真实 PPTP 服务器。最快搭建：
+
+```bash
+# 在一台 Linux 上跑 accel-ppp 容器（最常见的开源 PPTP 服务器）
+docker run -d --name pptpd --restart=unless-stopped --privileged --net=host \
+  -e PPTP_USER=test -e PPTP_PASS=test123 \
+  ghcr.io/accel-ppp/accel-ppp:latest
+# 或者直接装 poptop：apt install pptpd
+```
+
+测试步骤：
+
+1. 在 UI ③ 区填入服务器 IP（例如 192.168.1.10），端口默认 1723
+2. 点 **连接** → 状态走 `Idle → Connecting → WaitSccrp → Established`
+   - 成功后显示服务器 host name、vendor string
+3. 点 **呼叫** → 状态走 `Established → WaitOcrp → CallUp`
+   - 成功后显示本端 Call-ID（我们随机生成的）与服务器 Call-ID（OCRP 回的）
+4. 点 **Ping** → 发一次 Echo-Request，期望 Echo 计数 ok+1
+5. 点 **断开** → 发 StopCCRQ，等 StopCCRP，关 TCP，状态变 Closed
+
+如果服务器主动断开或异常，"服务器事件日志" 会显示 CDN / WEN / SLI 消息。
+
+**注意**：v0.0.4 只到 CallUp 为止。PPP/MPPE/数据面要等 v0.0.5+。在 CallUp 状态下不会有 IP 流量。
 
 ---
 
