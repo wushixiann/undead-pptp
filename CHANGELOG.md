@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+## [0.0.6] — 2026-05-20
+
+### Added
+- **Crypto.kt**：自实现 MD4 (RFC 1320, 纯 Kotlin, ~150 行) + SHA-1 包装 + DES 单块加密（7→8 字节奇偶位扩展）+ UTF-16-LE 编码工具
+  - MD4 自实现的原因：2026 年 Android 默认安全提供方已不可靠提供 MD4
+  - DES 仍走 `javax.crypto.Cipher("DES/ECB/NoPadding")` —— 只用作 MS-CHAP-V2 的 ChallengeResponse 算法，不做加密存储
+- **PAP 认证** (`ppp/PapAuth.kt`) — RFC 1334
+  - 单次 Authenticate-Request → Ack/Nak 流程
+  - 明文密码，仅在用户显式接受风险时使用
+- **MS-CHAP-V2 认证** (`ppp/MsChapV2Auth.kt`) — RFC 2759
+  - 完整 Challenge(1) → Response(2) → Success(3) / Failure(4) → Success-ack
+  - `ntPasswordHash() = MD4(UTF-16-LE(password))`
+  - `challengeHash() = SHA1(peerChal ‖ authChal ‖ user)[0:8]`
+  - `challengeResponse()`：3 次 DES 用 PasswordHash 填充为 21 字节的三段密钥
+  - `generateAuthenticatorResponse()`：用 RFC 2759 §8 的 Magic-1/Magic-2 常量做服务器签名验证（不匹配时记日志但仍接受，提高互通）
+  - `deriveMppeKeys()`：导出 MPPE master key 材料（v0.0.8 启用 MPPE 时使用）
+  - 自动 strip `DOMAIN\\user` 中的 domain（CHAP 哈希要的是裸用户名）
+- **PptpSession 扩展**：
+  - 新增 phase: `Authenticating`, `Authenticated`
+  - LCP Opened 后根据 `lcp.negotiatedAuth` 自动分支启动 PAP 或 MS-CHAP-V2
+  - 暴露 `authMessage` StateFlow 给 UI（服务器返回的消息）
+  - 暴露 `mppeKeys` 字段（成功 MS-CHAPv2 后填充）
+- UI: 新增用户名/密码输入框；显示认证消息、MPPE 主密钥派生标志、Authenticated 绿色验收提示
+
+### Notes
+- v0.0.6 终点：认证成功，链路处于 Authenticated 状态。**仍然没有 IP 流量**：IPCP（v0.0.7）才会协商 IP 地址、CCP/MPPE（v0.0.8）开启加密、VpnService 创建 TUN 把流量接进来
+- MS-CHAPv2 Authenticator Response 验证：不匹配时记 warning 但仍接受成功，因为部分服务器（特别是 RouterOS 早期版本）的 S= 字段格式略有偏差
+- MS-CHAP-V1 与未知认证协议会直接判为不支持并断开 —— LCP 协商时已把 MS-CHAP-V1 Nak 改为 MS-CHAP-V2
+
 ## [0.0.5] — 2026-05-20
 
 ### Added

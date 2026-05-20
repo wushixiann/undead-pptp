@@ -79,7 +79,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v005)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v006)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()
@@ -457,18 +457,22 @@ private fun SessionSection() {
     var session by remember { mutableStateOf<PptpSession?>(null) }
     val phase = session?.phase?.collectAsState()?.value ?: PptpSession.Phase.Idle
     val lastError = session?.lastError?.collectAsState()?.value
+    val authMessage = session?.authMessage?.collectAsState()?.value
     var server by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("1723") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var working by remember { mutableStateOf(false) }
 
     val lcpState = session?.lcpState() ?: LcpStateMachine.State.Initial
     val auth = session?.negotiatedAuth()
     val callSession = session?.controlChannel()?.session
+    val canEdit = session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed, PptpSession.Phase.Idle)
 
-    Text("④ 全栈一键连接（控制通道 + helper + LCP）", style = MaterialTheme.typography.titleMedium)
+    Text("④ 全栈一键连接（控制通道 + helper + LCP + 认证）",
+        style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
     Text("阶段: ${phase.name}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-    Spacer(Modifier.height(4.dp))
     Text("LCP: ${lcpState.name}${auth?.let { " · auth=${it.name}" } ?: ""}",
         fontFamily = FontFamily.Monospace, fontSize = 12.sp)
     Spacer(Modifier.height(8.dp))
@@ -480,7 +484,7 @@ private fun SessionSection() {
             label = { Text("PPTP 服务器") },
             singleLine = true,
             modifier = Modifier.weight(1f),
-            enabled = session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed),
+            enabled = canEdit,
         )
         Spacer(Modifier.width(8.dp))
         OutlinedTextField(
@@ -489,15 +493,32 @@ private fun SessionSection() {
             label = { Text("端口") },
             singleLine = true,
             modifier = Modifier.width(96.dp),
-            enabled = session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed),
+            enabled = canEdit,
         )
     }
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = username,
+        onValueChange = { username = it },
+        label = { Text("用户名") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+        enabled = canEdit,
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = password,
+        onValueChange = { password = it },
+        label = { Text("密码") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+        enabled = canEdit,
+    )
     Spacer(Modifier.height(8.dp))
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
-            enabled = !working && server.isNotEmpty() &&
-                (session == null || phase in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed)),
+            enabled = !working && server.isNotEmpty() && username.isNotEmpty() && canEdit,
             onClick = {
                 working = true
                 val s = PptpSession(context)
@@ -505,7 +526,7 @@ private fun SessionSection() {
                 scope.launch {
                     try {
                         withContext(Dispatchers.IO) {
-                            s.connect(server, port.toIntOrNull() ?: 1723)
+                            s.connect(server, port.toIntOrNull() ?: 1723, username, password)
                         }
                     } catch (_: Throwable) {
                         // Errors surface via s.lastError; phase already → Failed.
@@ -517,7 +538,7 @@ private fun SessionSection() {
         ) { Text("一键连接") }
 
         Button(
-            enabled = !working && session != null && phase !in arrayOf(PptpSession.Phase.Closed, PptpSession.Phase.Failed, PptpSession.Phase.Idle),
+            enabled = !working && session != null && !canEdit,
             onClick = {
                 working = true
                 scope.launch {
@@ -539,15 +560,32 @@ private fun SessionSection() {
             fontFamily = FontFamily.Monospace, fontSize = 11.sp,
         )
     }
+    val mppe = session?.mppeKeys
+    if (mppe != null) {
+        Text(
+            "MPPE master key 已派生 (${mppe.masterKey.size}B) — v0.0.8 启用加密",
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color(0xFF1565C0),
+        )
+    }
+    authMessage?.let {
+        Spacer(Modifier.height(8.dp))
+        Text("Auth: $it", fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+    }
     lastError?.let {
         Spacer(Modifier.height(8.dp))
         Text(it, color = Color.Red, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
     }
-    if (phase == PptpSession.Phase.LcpOpen) {
+    if (phase == PptpSession.Phase.Authenticated) {
         Spacer(Modifier.height(8.dp))
         Text(
-            "✅ LCP Opened — v0.0.5 验收通过。下一步 v0.0.6 加 PAP / MS-CHAP-V2 认证。",
+            "✅ Authenticated — v0.0.6 验收通过。下一步 v0.0.7 加 IPCP + VpnService TUN。",
             fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1B5E20),
+        )
+    } else if (phase == PptpSession.Phase.LcpOpen) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "LCP Opened — 等待启动认证…",
+            fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1565C0),
         )
     }
 }

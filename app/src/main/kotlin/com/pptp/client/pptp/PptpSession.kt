@@ -10,6 +10,9 @@ import com.pptp.client.ppp.AuthChoice
 import com.pptp.client.ppp.LcpCodec
 import com.pptp.client.ppp.LcpPacket
 import com.pptp.client.ppp.LcpStateMachine
+import com.pptp.client.ppp.MppeKeyMaterial
+import com.pptp.client.ppp.MsChapV2Auth
+import com.pptp.client.ppp.PapAuth
 import com.pptp.client.ppp.PppFrame
 import com.pptp.client.ppp.PppProtocol
 import com.pptp.client.util.NetworkUtil
@@ -36,10 +39,11 @@ import java.nio.ByteOrder
  *   ① ControlChannel : TCP 1723 → SCCRQ/SCCRP → OCRQ/OCRP → Call-IDs known
  *   ② HelperLifecycle: spawn root helper, open UDS bridge for GRE I/O
  *   ③ LCP            : run the PPP link-layer negotiation to Opened
+ *   ④ Auth           : PAP or MS-CHAP-V2 (whichever LCP negotiated)
  *
- * v0.0.5 stops at step ③. Auth (PAP/MS-CHAP-V2), IPCP, CCP/MPPE come in
- * v0.0.6 / v0.0.7. The orchestrator owns *all* lifecycle for the call: a
- * single [disconnect] tears down every layer cleanly.
+ * v0.0.6 stops at step ④ (Authenticated). IPCP + VpnService TUN come in
+ * v0.0.7, CCP/MPPE in v0.0.8. The orchestrator owns *all* lifecycle for
+ * the call: a single [disconnect] tears down every layer cleanly.
  */
 class PptpSession(private val context: Context) {
 
@@ -50,6 +54,8 @@ class PptpSession(private val context: Context) {
         BridgeStarting,
         LcpNegotiating,
         LcpOpen,
+        Authenticating,
+        Authenticated,
         Disconnecting,
         Closed,
         Failed,
@@ -61,6 +67,9 @@ class PptpSession(private val context: Context) {
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    private val _authMessage = MutableStateFlow<String?>(null)
+    val authMessage: StateFlow<String?> = _authMessage.asStateFlow()
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var control: ControlChannel? = null
@@ -69,6 +78,13 @@ class PptpSession(private val context: Context) {
     private var session: SessionState? = null
     private var peerIpv4Int: Int = 0
     private var rxJob: Job? = null
+
+    private var papAuth: PapAuth? = null
+    private var msChapAuth: MsChapV2Auth? = null
+
+    /** MPPE master-key material — populated only when MS-CHAP-V2 succeeds. */
+    @Volatile var mppeKeys: MppeKeyMaterial? = null
+        private set
 
     fun controlChannel(): ControlChannel? = control
     fun lcpState(): LcpStateMachine.State? = lcp?.state?.value
@@ -79,11 +95,18 @@ class PptpSession(private val context: Context) {
      * [disconnect]. On any failure [_phase] settles to [Phase.Failed] and
      * the underlying resources are torn down.
      */
-    suspend fun connect(host: String, port: Int = 1723) {
+    suspend fun connect(
+        host: String,
+        port: Int = 1723,
+        username: String,
+        password: String,
+    ) {
         check(_phase.value == Phase.Idle || _phase.value == Phase.Closed || _phase.value == Phase.Failed) {
             "session already running (phase=${_phase.value})"
         }
         _lastError.value = null
+        _authMessage.value = null
+        mppeKeys = null
 
         // Stage ①: control channel + outgoing call.
         _phase.value = Phase.ControlConnecting
@@ -100,7 +123,6 @@ class PptpSession(private val context: Context) {
         val s = cc.session ?: run { fail("缺少 SessionState"); return }
         session = s
 
-        // Resolve peer IPv4 for the data plane (helper needs the destination).
         peerIpv4Int = try {
             withContext(Dispatchers.IO) { resolveIpv4(host) }
         } catch (e: Throwable) {
@@ -142,7 +164,11 @@ class PptpSession(private val context: Context) {
             sender = { packet -> sendPpp(PppProtocol.LCP, LcpCodec.encodePacket(packet), s) },
             onStateChange = { st ->
                 when (st) {
-                    LcpStateMachine.State.Opened -> _phase.value = Phase.LcpOpen
+                    LcpStateMachine.State.Opened -> {
+                        _phase.value = Phase.LcpOpen
+                        // Kick off auth as soon as LCP is up.
+                        scope.launch { startAuth(username, password, s) }
+                    }
                     LcpStateMachine.State.Closed -> {
                         if (_phase.value !in arrayOf(Phase.Disconnecting, Phase.Closed, Phase.Failed)) {
                             scope.launch { fail("LCP 异常关闭") }
@@ -152,11 +178,58 @@ class PptpSession(private val context: Context) {
                 }
             },
             onAuthRequested = { auth ->
-                Log.i(TAG, "peer requested auth: $auth (v0.0.5: not yet implemented)")
+                Log.i(TAG, "peer requested auth: $auth")
             },
         )
         lcp = sm
         sm.open()
+    }
+
+    private fun startAuth(username: String, password: String, s: SessionState) {
+        val auth = lcp?.negotiatedAuth ?: AuthChoice.Unknown
+        Log.i(TAG, "starting auth: $auth")
+        _phase.value = Phase.Authenticating
+
+        when (auth) {
+            AuthChoice.Pap -> {
+                val pap = PapAuth(
+                    username = username,
+                    password = password,
+                    sender = { payload -> sendPpp(PppProtocol.PAP, payload, s) },
+                    onResult = { ok, msg ->
+                        _authMessage.value = msg
+                        if (ok) {
+                            _phase.value = Phase.Authenticated
+                        } else {
+                            scope.launch { fail("PAP 认证失败: $msg") }
+                        }
+                    },
+                )
+                papAuth = pap
+                pap.start()
+            }
+            AuthChoice.MsChapV2 -> {
+                val mc = MsChapV2Auth(
+                    username = username,
+                    password = password,
+                    sender = { payload -> sendPpp(PppProtocol.CHAP, payload, s) },
+                    onResult = { ok, msg, keys ->
+                        _authMessage.value = msg
+                        if (ok) {
+                            mppeKeys = keys
+                            _phase.value = Phase.Authenticated
+                        } else {
+                            scope.launch { fail("MS-CHAPv2 认证失败: $msg") }
+                        }
+                    },
+                )
+                msChapAuth = mc
+                mc.start()
+            }
+            AuthChoice.MsChapV1, AuthChoice.Unknown -> {
+                scope.launch { fail("不支持的认证协议: $auth（仅 PAP 与 MS-CHAP-V2）") }
+            }
+        }
     }
 
     suspend fun disconnect() {
@@ -185,10 +258,8 @@ class PptpSession(private val context: Context) {
         bridge = null
         runCatching { lcp?.shutdown() }
         lcp = null
-        runCatching {
-            // ControlChannel teardown is async via disconnect(); we may still
-            // be holding a closed instance here. Just drop the reference.
-        }
+        papAuth = null
+        msChapAuth = null
         control = null
         session = null
     }
@@ -239,11 +310,10 @@ class PptpSession(private val context: Context) {
                 }
                 lcp?.onReceive(pkt)
             }
-            PppProtocol.PAP, PppProtocol.CHAP -> {
-                Log.i(TAG, "auth packet protocol=${"0x%04x".format(ppp.protocol)} (v0.0.5 ignores)")
-            }
+            PppProtocol.PAP -> papAuth?.onReceive(ppp.payload)
+            PppProtocol.CHAP -> msChapAuth?.onReceive(ppp.payload)
             else -> {
-                Log.d(TAG, "PPP protocol ${"0x%04x".format(ppp.protocol)} ignored at v0.0.5")
+                Log.d(TAG, "PPP protocol ${"0x%04x".format(ppp.protocol)} ignored at v0.0.6")
             }
         }
     }

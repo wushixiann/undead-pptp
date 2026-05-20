@@ -2,7 +2,7 @@
 
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。Android 12 (API 31) 起系统已移除 PPTP 支持，本项目目标是在用户态恢复该能力。
 
-**当前版本：v0.0.5** — PPP/LCP 协商（GRE 数据面打通）
+**当前版本：v0.0.6** — PAP / MS-CHAP-V2 认证
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAPv2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -28,8 +28,8 @@ setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "wlan0", ...);
 | v0.0.2 ✅ | 修复 libsu 根权限检测时序 |
 | v0.0.3 ✅ | App ↔ helper UDS 桥 |
 | v0.0.4 ✅ | PPTP 控制通道 (TCP 1723) |
-| v0.0.5 ✅ | LCP 协商（GRE 数据面打通）— 本版本 |
-| v0.0.6 | PAP / MS-CHAPv2 认证 |
+| v0.0.5 ✅ | LCP 协商（GRE 数据面打通） |
+| v0.0.6 ✅ | PAP / MS-CHAP-V2 认证 — 本版本 |
 | v0.0.7 | IPCP + VpnService TUN |
 | v0.0.8 | MPPE-128 stateless |
 | v0.0.9 | 多服务器互通测试 |
@@ -158,12 +158,16 @@ docker run -d --name pptpd --restart=unless-stopped --privileged --net=host \
    - `BridgeStarting`：拉起 helper（自动用 ① 验证过的方式）
    - `LcpNegotiating`：开始发 LCP ConfigureRequest，与服务器一来一回
    - `LcpOpen`：LCP 协商完成 ✅
-3. 验收：UI 显示绿色 "LCP Opened — v0.0.5 验收通过"，同时 `auth=Pap` 或 `auth=MsChapV2`（服务器要求的认证类型）
-4. v0.0.5 到此停止 — **大多数服务器会在 LCP Open 后等几秒不见认证就主动断开**（CDN 或 LCP Terminate-Request 到达），UI 会切到 Failed 阶段并显示原因。这是预期行为，v0.0.6 加认证后即可继续
+3. v0.0.5 验收：LCP Opened
+4. v0.0.6 验收：自动进入 `Authenticating` → `Authenticated`，UI 显示绿色 "✅ Authenticated"
+   - 如果服务器要求 MS-CHAP-V2，MPPE master key 会派生出来（界面会显示对应文字），等 v0.0.8 启用 MPPE 时使用
+   - 失败会停在 Failed，错误信息显示服务器返回的 `E=646 R=1 ...`（典型为账号或密码错）
+5. 注意 v0.0.6 完成后仍**没有真实 IP 流量** —— 还差 IPCP (v0.0.7) 协商出 IP 地址、CCP/MPPE (v0.0.8) 启用加密、VpnService 建 TUN 让系统流量进来
 
 调试小贴士：
-- 服务器侧 `tail -f /var/log/syslog` 或 accel-ppp 日志，能看到 "LCP layer started" / "LCP layer up" 等事件
+- 服务器侧 `tail -f /var/log/syslog` 或 accel-ppp 日志，能看到 "LCP layer started" / "auth_pap" / "auth_chap" / "MPPE enabled" 等事件
 - 想看 GRE 抓包可在服务器侧 `tcpdump -i any -nn proto gre`
+- 想看 PPP/LCP/CHAP 细节，先 `tcpdump -i any -nn proto gre -w pptp.pcap` 再用 Wireshark 打开（自带 PPTP-GRE/PPP 解析）
 
 ---
 
