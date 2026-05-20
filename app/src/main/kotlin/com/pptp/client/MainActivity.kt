@@ -83,7 +83,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v007)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v008)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()
@@ -488,13 +488,19 @@ private fun SessionSection() {
         pendingStart = false
     }
 
-    Text("④ 完整 VPN（控制通道 + 认证 + IPCP + VpnService TUN）",
+    Text("④ 完整 VPN（控制 + 认证 + IPCP + MPPE + TUN）",
         style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
     Text("阶段: ${state.phase}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
     if (state.localIp.isNotEmpty()) {
         Text(
             "TUN 已建立：本端 ${state.localIp}  对端 ${state.peerIp}",
+            fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1B5E20),
+        )
+    }
+    if (state.mppeActive) {
+        Text(
+            "🔒 MPPE-128 stateless 已启用",
             fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Color(0xFF1B5E20),
         )
     }

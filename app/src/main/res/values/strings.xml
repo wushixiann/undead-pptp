@@ -9,6 +9,7 @@
     <string name="milestone_v005">v0.0.5 — PPP/LCP 协商（GRE 数据面打通）</string>
     <string name="milestone_v006">v0.0.6 — PAP / MS-CHAP-V2 认证</string>
     <string name="milestone_v007">v0.0.7 — IPCP + VpnService TUN（完整 VPN，未加密）</string>
+    <string name="milestone_v008">v0.0.8 — CCP + MPPE-128 stateless（加密 VPN）</string>
     <string name="helper_check_button">检测 root + 原始 GRE socket</string>
     <string name="helper_check_idle">尚未检测</string>
     <string name="helper_check_running">检测中…</string>

@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+## [0.0.8] — 2026-05-20
+
+### Added
+- **RC4 流密码** (`ppp/Rc4.kt`) — 40 行纯 Kotlin 实现。理由：2026 Android 各 crypto provider 多数已移除 RC4；MPPE 在 stateless 模式下每包都要重新初始化 RC4，自实现避免 JCE 开销
+- **MPPE 实现** (`ppp/Mppe.kt`) — RFC 3078 + RFC 3079
+  - 128-bit stateless 模式（最常见，accel-ppp / Windows RRAS / MikroTik 默认）
+  - `getAsymmetricStartKey()`：从 MS-CHAPv2 master key 派生不同方向的 send/recv 初始密钥（Magic-2 / Magic-3 字串）
+  - `nextKey()`：每包轮键 SHA1(init || pad1 || curr || pad2) → RC4 自加密
+  - `encrypt()` / `decrypt()`：实现 ABCD 标志位 + 12-bit coherency count；A bit (Flushed) 永远置位（stateless 要求）；D bit (Encrypted) 必须置位
+  - coherency 跳跃自动追上（计算 delta，连续轮键追到当前 CC）
+  - 注意：MPPE 把*内层 PPP 协议字段*一并加密，不只是 payload；外层 PPP 协议变为 0x00FD
+- **CCP 状态机** (`ppp/CcpStateMachine.kt`) — RFC 1962 + RFC 3078
+  - 复用 LcpPacket/LcpCodec 包结构；CCP 额外定义 code 14 (Reset-Request) / 15 (Reset-Ack)
+  - 选项 18 (MPPE Supported Bits)：4 字节位掩码
+  - 本端只提案 `MPPE-128 stateless`；对端不同提案直接重发；Reject 则放弃 → close
+  - 支持 Reset-Request/Ack（本地解密失败时主动发，对端要求时回 Ack + 调用回调让上层 reset Mppe）
+- **PptpSession 加密路径**：
+  - 新增 Phase: `CcpNegotiating`
+  - 认证成功后若 `mppeKeys` 存在（即 MS-CHAPv2 路径）启动 CCP；否则跳过（PAP 明文）
+  - `sendIpv4()`：MPPE 激活后把 `[0x0021][IPv4 payload]` 整体喂给 `mppe.encrypt()`，外层协议改为 0x00FD
+  - `handleMppeRx()`：解密 0x00FD 帧，剥出内层协议字段 (0x0021)，把 IPv4 包投递给 TUN
+  - 解密失败（coherency gap 等）自动发 CCP Reset-Request
+- UI: 加 "🔒 MPPE-128 stateless 已启用" 提示
+
+### Notes
+- v0.0.8 完成后**应能直连主流默认配置的 PPTP 服务器**（accel-ppp / Windows RRAS / MikroTik / poptop），无需关 MPPE
+- PAP + MPPE 在协议上互斥（PAP 不产生 master key）。如果服务器用 PAP，链路保持明文（v0.0.7 行为）
+- 40-bit / 56-bit MPPE 与 stateful 模式 v0.0.8 不支持；服务器要求时会 nak
+
 ## [0.0.7] — 2026-05-20
 
 ### Added

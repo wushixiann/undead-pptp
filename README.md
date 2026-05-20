@@ -2,7 +2,7 @@
 
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。Android 12 (API 31) 起系统已移除 PPTP 支持，本项目目标是在用户态恢复该能力。
 
-**当前版本：v0.0.7** — IPCP + VpnService TUN（完整 VPN，未加密）
+**当前版本：v0.0.8** — CCP + MPPE-128 stateless（加密 VPN）
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAPv2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -30,7 +30,8 @@ setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE, "wlan0", ...);
 | v0.0.4 ✅ | PPTP 控制通道 (TCP 1723) |
 | v0.0.5 ✅ | LCP 协商（GRE 数据面打通） |
 | v0.0.6 ✅ | PAP / MS-CHAP-V2 认证 |
-| v0.0.7 ✅ | IPCP + VpnService TUN（完整 VPN，无加密）— 本版本 |
+| v0.0.7 ✅ | IPCP + VpnService TUN（完整 VPN，无加密） |
+| v0.0.8 ✅ | CCP + MPPE-128 stateless（加密 VPN）— 本版本 |
 | v0.0.7 | IPCP + VpnService TUN |
 | v0.0.8 | MPPE-128 stateless |
 | v0.0.9 | 多服务器互通测试 |

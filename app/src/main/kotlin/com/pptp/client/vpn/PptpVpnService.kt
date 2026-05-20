@@ -93,7 +93,7 @@ class PptpVpnService : VpnService() {
         // Observe phase to keep notification text useful.
         scope.launch {
             sess.phase.collect { ph ->
-                state.value = state.value.copy(phase = ph.name)
+                state.value = state.value.copy(phase = ph.name, mppeActive = sess.mppeActive)
                 updateNotification("PPTP", "状态: ${ph.name}")
             }
         }
@@ -188,6 +188,7 @@ class PptpVpnService : VpnService() {
         val phase: String = "Idle",
         val localIp: String = "",
         val peerIp: String = "",
+        val mppeActive: Boolean = false,
         val lastError: String? = null,
     )
 

@@ -7,9 +7,11 @@ import com.pptp.client.helper.HelperLifecycle
 import com.pptp.client.helper.UdsBridge
 import com.pptp.client.helper.UdsFrame
 import com.pptp.client.ppp.AuthChoice
+import com.pptp.client.ppp.CcpStateMachine
 import com.pptp.client.ppp.IpcpStateMachine
 import com.pptp.client.ppp.LcpCodec
 import com.pptp.client.ppp.LcpStateMachine
+import com.pptp.client.ppp.Mppe
 import com.pptp.client.ppp.MppeKeyMaterial
 import com.pptp.client.ppp.MsChapV2Auth
 import com.pptp.client.ppp.PapAuth
@@ -66,6 +68,7 @@ class PptpSession(
         LcpOpen,
         Authenticating,
         Authenticated,
+        CcpNegotiating,
         IpcpNegotiating,
         IpcpOpen,
         Connected,
@@ -88,6 +91,7 @@ class PptpSession(
     private var control: ControlChannel? = null
     private var bridge: UdsBridge? = null
     private var lcp: LcpStateMachine? = null
+    private var ccp: CcpStateMachine? = null
     private var ipcp: IpcpStateMachine? = null
     private var session: SessionState? = null
     private var peerIpv4Int: Int = 0
@@ -101,9 +105,14 @@ class PptpSession(
 
     @Volatile var mppeKeys: MppeKeyMaterial? = null
         private set
+    @Volatile var mppe: Mppe? = null
+        private set
+    @Volatile var mppeActive: Boolean = false
+        private set
 
     fun controlChannel(): ControlChannel? = control
     fun lcpState(): LcpStateMachine.State? = lcp?.state?.value
+    fun ccpState(): CcpStateMachine.State? = ccp?.state?.value
     fun ipcpState(): IpcpStateMachine.State? = ipcp?.state?.value
     fun negotiatedAuth(): AuthChoice? = lcp?.negotiatedAuth
     fun ipcpLocalConfig(): IpcpStateMachine.LocalConfig? = ipcp?.localConfig
@@ -122,7 +131,17 @@ class PptpSession(
     /** Send an outbound IPv4 packet (called by TunPipe). */
     fun sendIpv4(packet: ByteArray) {
         val s = session ?: return
-        sendPpp(PppProtocol.IPV4, packet, s)
+        val mppe = this.mppe
+        if (mppeActive && mppe != null) {
+            // MPPE encrypts the *PPP protocol + payload* together (RFC 3078 §2),
+            // and the outer PPP protocol becomes 0x00FD (compressed datagram).
+            val inner = ByteBuffer.allocate(2 + packet.size).order(ByteOrder.BIG_ENDIAN)
+                .putShort(PppProtocol.IPV4.toShort()).put(packet).array()
+            val ciphertext = mppe.encrypt(inner)
+            sendPpp(PppProtocol.MPPE_COMPRESSED, ciphertext, s)
+        } else {
+            sendPpp(PppProtocol.IPV4, packet, s)
+        }
     }
 
     /**
@@ -248,8 +267,42 @@ class PptpSession(
 
     private fun onAuthOk(s: SessionState) {
         _phase.value = Phase.Authenticated
-        // Immediately drive IPCP. (In a real PPTP setup CCP may also start in parallel.)
+        // If MS-CHAPv2 derived MPPE master key, start CCP in parallel with IPCP.
+        // Otherwise (PAP path), skip CCP entirely — tunnel will be unencrypted.
+        if (mppeKeys != null) {
+            startCcp(s)
+        }
         startIpcp(s)
+    }
+
+    private fun startCcp(s: SessionState) {
+        _phase.value = Phase.CcpNegotiating
+        val keyMat = mppeKeys ?: return
+        // We are the client (not server); send/recv asymmetric keys derived in Mppe ctor.
+        val m = Mppe(keyMat.masterKey, isServer = false)
+        mppe = m
+        val sm = CcpStateMachine(
+            sender = { packet -> sendPpp(PppProtocol.CCP, LcpCodec.encodePacket(packet), s) },
+            onOpened = {
+                mppeActive = true
+                Log.i(TAG, "CCP opened — MPPE-128 stateless active")
+            },
+            onClosed = {
+                mppeActive = false
+                if (_phase.value !in arrayOf(Phase.Disconnecting, Phase.Closed, Phase.Failed)) {
+                    scope.launch { fail("CCP 异常关闭 — MPPE 协商失败") }
+                }
+            },
+            onResetRequest = { _ ->
+                // Server tells us their decryption desynced. Reset our state.
+                mppe?.reset()
+            },
+            onResetAck = { _ ->
+                // We previously sent a Reset-Request; nothing more to do (state already reset).
+            },
+        )
+        ccp = sm
+        sm.open()
     }
 
     private fun startIpcp(s: SessionState) {
@@ -275,6 +328,7 @@ class PptpSession(
         if (_phase.value in arrayOf(Phase.Idle, Phase.Closed)) return
         _phase.value = Phase.Disconnecting
         try {
+            ccp?.close()
             ipcp?.close()
             lcp?.close()
             delay(300)
@@ -297,9 +351,13 @@ class PptpSession(
         runCatching { bridge?.stop() }
         bridge = null
         runCatching { lcp?.shutdown() }
+        runCatching { ccp?.shutdown() }
         runCatching { ipcp?.shutdown() }
         lcp = null
+        ccp = null
         ipcp = null
+        mppe = null
+        mppeActive = false
         papAuth = null
         msChapAuth = null
         control = null
@@ -339,12 +397,34 @@ class PptpSession(
             }
             PppProtocol.PAP -> papAuth?.onReceive(ppp.payload)
             PppProtocol.CHAP -> msChapAuth?.onReceive(ppp.payload)
+            PppProtocol.CCP -> {
+                val pkt = try { LcpCodec.decodePacket(ppp.payload) } catch (_: Throwable) { return }
+                ccp?.onReceive(pkt)
+            }
             PppProtocol.IPCP -> {
                 val pkt = try { LcpCodec.decodePacket(ppp.payload) } catch (_: Throwable) { return }
                 ipcp?.onReceive(pkt)
             }
             PppProtocol.IPV4 -> tunDeliver?.invoke(ppp.payload)
+            PppProtocol.MPPE_COMPRESSED -> handleMppeRx(ppp.payload)
             else -> Log.d(TAG, "PPP protocol ${"0x%04x".format(ppp.protocol)} ignored")
+        }
+    }
+
+    private fun handleMppeRx(payload: ByteArray) {
+        val m = mppe ?: return
+        val plain = m.decrypt(payload)
+        if (plain == null) {
+            // Coherency gap or decryption failure → ask peer to flush.
+            ccp?.sendResetRequest()
+            return
+        }
+        if (plain.size < 2) return
+        val innerProto = ((plain[0].toInt() and 0xFF) shl 8) or (plain[1].toInt() and 0xFF)
+        val innerPayload = plain.copyOfRange(2, plain.size)
+        when (innerProto) {
+            PppProtocol.IPV4 -> tunDeliver?.invoke(innerPayload)
+            else -> Log.d(TAG, "MPPE inner protocol ${"0x%04x".format(innerProto)} ignored")
         }
     }
 
