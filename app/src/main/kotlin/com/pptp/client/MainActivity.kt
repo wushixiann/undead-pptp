@@ -53,6 +53,7 @@ import com.pptp.client.pptp.ControlChannel
 import com.pptp.client.pptp.ControlMessage
 import com.pptp.client.vpn.PptpVpnService
 import com.pptp.client.util.NetworkUtil
+import com.pptp.client.util.SettingsStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.consumeAsFlow
@@ -83,7 +84,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v009)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v010)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()
@@ -459,9 +460,10 @@ private fun SessionSection() {
     val context = LocalContext.current
     val state = PptpVpnService.observable.collectAsState().value
 
-    var server by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf("1723") }
-    var username by remember { mutableStateOf("") }
+    val settings = remember { SettingsStore(context) }
+    var server by remember { mutableStateOf(settings.server) }
+    var port by remember { mutableStateOf(settings.port.toString()) }
+    var username by remember { mutableStateOf(settings.username) }
     var password by remember { mutableStateOf("") }
     var pendingStart by remember { mutableStateOf(false) }
 
@@ -469,6 +471,7 @@ private fun SessionSection() {
     val canEdit = !running
 
     fun sendStart() {
+        settings.saveConnection(server, port.toIntOrNull() ?: 1723, username)
         val intent = Intent(context, PptpVpnService::class.java).apply {
             action = PptpVpnService.ACTION_START
             putExtra(PptpVpnService.EXTRA_HOST, server)

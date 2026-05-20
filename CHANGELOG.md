@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-05-20
+
+**首个完整发布。** 协议栈 v0.0.1–v0.0.9 已具备完整功能；本版本只增设置持久化与文档打磨，没有协议层改动。
+
+### Added
+- **设置持久化** (`util/SettingsStore.kt`)：用 SharedPreferences 记住上次的服务器 / 端口 / 用户名
+  - **不持久化密码** —— 每次手动输入。考虑 PPTP 本身已弱，磁盘上明文 password 不是好主意
+- UI 启动时自动加载上次配置；点 "连接 VPN" 时回写
+
+### Documentation
+- **README 重写**：架构图、构建步骤、测试用 PPTP 服务器搭建脚本（accel-ppp / poptop 二选一）、Wireshark 抓包提示、已知风险表、文件布局速览
+- 路线图标记 v0.1.0 为首个完整发布
+
+### Open Items (未来版本)
+- NetworkCallback 监听底层变更，WiFi↔4G 切换自动重连
+- Kill-switch：VPN 异常断开时仍阻止明文出口
+- 多服务器配置管理
+- 应用分流（per-app VPN routing）
+- 真机互通性矩阵（accel-ppp / Windows RRAS / MikroTik）
+
 ## [0.0.9] — 2026-05-20
 
 ### Fixed / Improved

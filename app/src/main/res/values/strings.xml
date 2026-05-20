@@ -11,6 +11,7 @@
     <string name="milestone_v007">v0.0.7 — IPCP + VpnService TUN（完整 VPN，未加密）</string>
     <string name="milestone_v008">v0.0.8 — CCP + MPPE-128 stateless（加密 VPN）</string>
     <string name="milestone_v009">v0.0.9 — 互通性与容错改进</string>
+    <string name="milestone_v010">v0.1.0 — 设置持久化（首个完整发布）</string>
     <string name="helper_check_button">检测 root + 原始 GRE socket</string>
     <string name="helper_check_idle">尚未检测</string>
     <string name="helper_check_running">检测中…</string>
