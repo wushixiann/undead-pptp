@@ -115,8 +115,7 @@ class LcpStateMachine(
             }
             LcpCode.TerminateAck -> if (_state.value == State.Closing) transitionTo(State.Closed)
             LcpCode.EchoRequest -> {
-                // Echo-Reply must include our Magic-Number followed by peer's data
-                val data = peerMagicBytes() + p.data.copyOfRange(4.coerceAtMost(p.data.size), p.data.size)
+                // Echo-Reply: 4-byte OUR Magic-Number + remainder of the request body.
                 send(LcpCode.EchoReply, peerMagicReplyData(p.data), p.identifier)
             }
             LcpCode.EchoReply, LcpCode.DiscardRequest -> { /* informational */ }
@@ -125,16 +124,6 @@ class LcpStateMachine(
                 transitionTo(State.Closed)
             }
         }
-    }
-
-    private fun peerMagicBytes(): ByteArray {
-        val m = peerMagic
-        return byteArrayOf(
-            (m ushr 24 and 0xFF).toByte(),
-            (m ushr 16 and 0xFF).toByte(),
-            (m ushr 8 and 0xFF).toByte(),
-            (m and 0xFF).toByte(),
-        )
     }
 
     private fun peerMagicReplyData(reqData: ByteArray): ByteArray {
@@ -254,11 +243,27 @@ class LcpStateMachine(
     }
 
     private fun handleConfigureReject(p: LcpPacket) {
-        // Peer doesn't recognize one of our options; remove them and resend.
-        // For v0.0.5 we only ever propose MRU + Magic, both of which are mandatory.
-        // If peer rejects them we give up.
-        Log.w(TAG, "peer rejected ConfReq option(s) (${p.data.size} bytes) — abort")
-        close()
+        // Peer doesn't recognize one or more of our options; drop them and retry.
+        val rejected = try {
+            LcpCodec.decodeOptions(p.data).map { it.type }.toSet()
+        } catch (e: Throwable) {
+            Log.w(TAG, "bad Reject data", e); close(); return
+        }
+        val keep = ourOptions().filter { it.type !in rejected }
+        Log.w(TAG, "peer rejected option types $rejected; retrying with ${keep.map { it.type }}")
+        if (keep.isEmpty()) {
+            Log.w(TAG, "no options left after Reject — giving up")
+            close(); return
+        }
+        if (retryCount < maxConfigure) {
+            retryCount++
+            val data = LcpCodec.encodeOptions(keep)
+            val id = nextId.getAndIncrement() and 0xFF
+            lastReqId = id
+            lastReqBytes = data
+            sender(LcpPacket(LcpCode.ConfigureRequest, id, data))
+            scheduleRetry()
+        } else close()
     }
 
     // ----- TX helpers -----

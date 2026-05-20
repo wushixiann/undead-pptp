@@ -83,7 +83,7 @@ private fun Screen(padding: PaddingValues) {
     ) {
         Text("${stringResource(R.string.version_label)}: ${BuildConfig.VERSION_NAME}")
         Spacer(Modifier.height(8.dp))
-        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v008)}")
+        Text("${stringResource(R.string.milestone_label)}: ${stringResource(R.string.milestone_v009)}")
         Spacer(Modifier.height(16.dp))
 
         ProbeSection()

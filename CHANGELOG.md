@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.0.9] — 2026-05-20
+
+### Fixed / Improved
+- **PAP / MS-CHAP-V2 不再无限等待**：双方各加 10–12s 超时 + 重传（PAP 最多 3 次），超时后失败回报。原先服务器丢包就永久挂起
+- **LCP Configure-Reject 容错**：之前直接 close。现在解析被 reject 的 option 类型，把它从我们的提案里丢掉再重发；只有当所有 option 都被 reject 才放弃
+- **VpnService `addDisallowedApplication(packageName)`**：把本应用自身从 VPN 路由表排除。否则 control TCP 1723 心跳的回包可能被路由到 TUN，造成自循环；libsu shell 子进程访问 helper UDS 也可能被影响
+- **LCP Echo-Reply 修正**：移除一段 dead code，确保我们 reply 时填的是**我们自己的** Magic-Number（RFC 1661 §5.8），而不是 peer 的
+- **认证状态机 race condition**：Success/Failure 路径全部 `compareAndSet(false, true)` 保护，并取消未触发的 timeoutJob，避免多线程下重复回调
+
+### Known Untested Areas
+- 没有真机测试反馈，下列场景仅按 RFC + pppd 源参考写就：
+  - MikroTik / Windows RRAS / accel-ppp 三家服务器互通
+  - 网络从 WiFi 切到蜂窝时的行为（理论上会断，v0.1.0 处理重连）
+  - 实际 ping/HTTP 吞吐量
+- 真机测一遍后所有"应该如何"会变成"实际如何"，到时再迭代
+
 ## [0.0.8] — 2026-05-20
 
 ### Added

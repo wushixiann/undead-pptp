@@ -117,6 +117,9 @@ class PptpVpnService : VpnService() {
             .setBlocking(true)
         if (local.primaryDns != 0) builder.addDnsServer(ipStr(local.primaryDns))
         if (local.secondaryDns != 0) builder.addDnsServer(ipStr(local.secondaryDns))
+        // Don't loop our own app's traffic through the VPN — control channel keep-alives,
+        // libsu shell, helper UDS, etc. all need direct access to the underlay.
+        runCatching { builder.addDisallowedApplication(packageName) }
         // Configure intent to open the app when user taps the system VPN notification.
         builder.setConfigureIntent(
             PendingIntent.getActivity(

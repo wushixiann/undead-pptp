@@ -1,6 +1,13 @@
 package com.pptp.client.ppp
 
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
@@ -30,12 +37,35 @@ class PapAuth(
     /** Pure PPP-payload bytes (just the CHAP/PAP packet, no protocol field). */
     private val sender: (ByteArray) -> Unit,
     private val onResult: (success: Boolean, message: String) -> Unit,
+    private val timeoutMs: Long = 10_000,
+    private val maxAttempts: Int = 3,
 ) {
     private val identifier: Int = (System.nanoTime() and 0xFF).toInt()
     private val finished = AtomicBoolean(false)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var timeoutJob: Job? = null
+    private var attempts: Int = 0
 
     fun start() {
         send()
+        scheduleTimeout()
+    }
+
+    private fun scheduleTimeout() {
+        timeoutJob?.cancel()
+        timeoutJob = scope.launch {
+            delay(timeoutMs)
+            if (finished.get()) return@launch
+            attempts++
+            if (attempts < maxAttempts) {
+                Log.w(TAG, "PAP no reply, retransmit #$attempts")
+                send()
+                scheduleTimeout()
+            } else if (finished.compareAndSet(false, true)) {
+                scope.cancel()
+                onResult(false, "PAP 超时（${maxAttempts} 次无应答）")
+            }
+        }
     }
 
     private fun send() {
@@ -74,12 +104,16 @@ class PapAuth(
         } else ""
         when (code) {
             2 -> {
-                finished.set(true)
-                onResult(true, msg.ifEmpty { "PAP Ack" })
+                if (finished.compareAndSet(false, true)) {
+                    timeoutJob?.cancel(); scope.cancel()
+                    onResult(true, msg.ifEmpty { "PAP Ack" })
+                }
             }
             3 -> {
-                finished.set(true)
-                onResult(false, msg.ifEmpty { "PAP Nak" })
+                if (finished.compareAndSet(false, true)) {
+                    timeoutJob?.cancel(); scope.cancel()
+                    onResult(false, msg.ifEmpty { "PAP Nak" })
+                }
             }
             else -> Log.w(TAG, "PAP unexpected code=$code")
         }

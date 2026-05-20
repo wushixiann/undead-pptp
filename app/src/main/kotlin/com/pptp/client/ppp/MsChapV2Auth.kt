@@ -1,6 +1,13 @@
 package com.pptp.client.ppp
 
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
@@ -40,11 +47,14 @@ class MsChapV2Auth(
     private val password: String,
     private val sender: (ByteArray) -> Unit,
     private val onResult: (success: Boolean, message: String, keys: MppeKeyMaterial?) -> Unit,
+    private val challengeTimeoutMs: Long = 12_000,
 ) {
     enum class State { Idle, WaitChallenge, WaitSuccess, Done, Failed }
 
     private val rng = SecureRandom()
     private val finished = AtomicBoolean(false)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var timeoutJob: Job? = null
 
     @Volatile var state: State = State.Idle
         private set
@@ -56,7 +66,16 @@ class MsChapV2Auth(
 
     fun start() {
         state = State.WaitChallenge
+        scheduleTimeout(challengeTimeoutMs, "等待服务器 Challenge 超时")
         // Nothing to send; server sends Challenge first.
+    }
+
+    private fun scheduleTimeout(ms: Long, reason: String) {
+        timeoutJob?.cancel()
+        timeoutJob = scope.launch {
+            delay(ms)
+            if (!finished.get()) fail(reason)
+        }
     }
 
     fun onReceive(payload: ByteArray) {
@@ -100,6 +119,7 @@ class MsChapV2Auth(
         Log.d(TAG, "MSCHAPv2 challenge from '$serverName', sending response")
         sendResponse(id)
         state = State.WaitSuccess
+        scheduleTimeout(challengeTimeoutMs, "等待 Success/Failure 超时")
     }
 
     private fun sendResponse(identifier: Int) {
@@ -142,9 +162,11 @@ class MsChapV2Auth(
         sender(ack)
 
         val keys = deriveMppeKeys(password, ntResponse)
-        finished.set(true)
-        state = State.Done
-        onResult(true, "MS-CHAPv2 OK${if (!arMatched) " (AR mismatch — accepted)" else ""}: $message", keys)
+        if (finished.compareAndSet(false, true)) {
+            timeoutJob?.cancel(); scope.cancel()
+            state = State.Done
+            onResult(true, "MS-CHAPv2 OK${if (!arMatched) " (AR mismatch — accepted)" else ""}: $message", keys)
+        }
     }
 
     private fun handleFailure(id: Int, payload: ByteArray, length: Int) {
@@ -156,6 +178,7 @@ class MsChapV2Auth(
 
     private fun fail(reason: String) {
         if (finished.compareAndSet(false, true)) {
+            timeoutJob?.cancel(); scope.cancel()
             state = State.Failed
             onResult(false, reason, null)
         }
