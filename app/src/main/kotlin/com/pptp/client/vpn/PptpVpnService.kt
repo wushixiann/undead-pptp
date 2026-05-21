@@ -125,9 +125,20 @@ class PptpVpnService : VpnService() {
         local: IpcpStateMachine.LocalConfig,
         peer: IpcpStateMachine.PeerConfig,
     ) {
+        // PPTP MTU budget worst case:
+        //   outer IPv4 (20) + GRE-PPTP (16, with S+A flags)
+        //   + PPP framing (4: FF 03 + 2B proto) + MPPE header (2)
+        //   + inner PPP proto (2)         = 44 bytes overhead
+        // 1500 underlay − 44 = 1456 max inner. We use 1380 for extra slack:
+        //   - some underlay can be 1492 (PPPoE-on-DSL); 1492 − 44 = 1448
+        //   - intermediate links (cellular, encapsulating tunnels) may eat a few more
+        //   - MSS will be 1380 − 40 = 1340, well below typical 1460
+        // If the server lacks `iptables -t mangle … TCPMSS --clamp-mss-to-pmtu`,
+        // browsers can hit a PMTUD black-hole (small ICMP passes, large TCP doesn't).
+        // A conservative MTU here keeps things working without server-side cooperation.
         val builder = Builder()
             .setSession("PPTP")
-            .setMtu(1400)
+            .setMtu(1380)
             .addAddress(ipStr(local.localIpv4), 32)
             .addRoute("0.0.0.0", 0)
             .setBlocking(true)

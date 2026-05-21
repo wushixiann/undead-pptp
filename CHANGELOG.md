@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-05-21
+
+### Fixed
+- **TUN MTU 1400 → 1380** 缓解 TCP 大包黑洞
+
+实测发现 `ping baidu.com` 通（DNS 解析 + ICMP 来回都正常），但浏览器打不开 baidu.com。典型的 **PPTP MSS / PMTUD 黑洞**：
+
+- ICMP echo 包很小（64-100 字节），不触发 MTU 限制
+- HTTPS 握手 TLS ClientHello 通常 1-2 KB，大包到了某个不允许分片又比 PPTP 隧道窄的链路上被默默丢了
+- 上行小包能过、下行大包过不来 → TCP 卡死
+
+MTU 1400 在标准 1500 以太网下还能撑住，但 PPTP 服务器与目标网站之间若有 1492 PPPoE 链路（中国大量光猫拨号是 PPPoE）就掉进黑洞。降到 1380 给链路上更多缓冲。
+
+### Notes — 配套服务器端 fix（更治本）
+
+服务器跑：
+```bash
+sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+sudo netfilter-persistent save
+```
+
+这条 MSS clamping 规则会改写 SYN 包里的 MSS 字段，让两端 TCP 自动协商安全的小包。**几乎所有"PPTP 能 ping 不能浏览网页"的故障靠这条解决**。
+
 ## [0.1.8] — 2026-05-21
 
 **MPPE 加解密 v0.1.7 已实证通过**，IP 流量打通。本版本主要是 DNS 路由细节打磨：
