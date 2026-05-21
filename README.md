@@ -3,7 +3,9 @@
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。
 Android 12 (API 31) 起系统已移除 PPTP 支持，本项目在用户态恢复该能力。
 
-**当前版本：v0.1.0**
+**当前版本：v0.1.8（v0.1.7 起协议栈实证可用）**
+
+✅ 实测打通：Android 14 (Pixel) + Magisk root + pptpd 服务器，能 ping baidu.com、走完整 IPv4 流量、MPPE-128 stateless 加密。
 
 > ⚠️ PPTP 协议本身不安全（MS-CHAP-V2 已被破解，MPPE 弱）。本项目为可用性而生，不推荐用于传输敏感数据。
 
@@ -133,16 +135,16 @@ sudo tcpdump -i any -nn -w pptp.pcap '(tcp port 1723) or (proto gre)'
 
 | 版本 | 里程碑 | 状态 |
 |---|---|---|
-| v0.0.1 | 项目骨架 + helper 源码 | ✅ |
-| v0.0.2 | 修复 libsu 根权限检测时序 | ✅ |
-| v0.0.3 | App ↔ helper UDS 桥 | ✅ |
-| v0.0.4 | PPTP 控制通道 (TCP 1723) | ✅ |
-| v0.0.5 | LCP 协商 | ✅ |
-| v0.0.6 | PAP / MS-CHAP-V2 认证 | ✅ |
-| v0.0.7 | IPCP + VpnService TUN | ✅ |
-| v0.0.8 | CCP + MPPE-128 stateless | ✅ |
-| v0.0.9 | 互通性与容错改进 | ✅ |
-| **v0.1.0** | **设置持久化（首个完整发布）** | ✅ |
+| v0.0.1–v0.0.9 | 协议栈分层实现（控制 / PPP / Auth / IPCP / MPPE / interop） | ✅ |
+| v0.1.0 | 设置持久化（首个完整发布） | ✅ |
+| v0.1.1 | （内部测试） | ✅ |
+| v0.1.2 | 16 KB page-size 对齐（Android 15 兼容） | ✅ |
+| v0.1.3 | 蜂窝 GRE 诊断（TX/RX 计数 + iface 警告 + helper logcat） | ✅ |
+| v0.1.4 | NetworkUtil 接口优先级选 WiFi（修复 SO_BINDTODEVICE 绑错） | ✅ |
+| v0.1.5 | MPPE encrypt D bit + decrypt 按 CC 派生密钥 | ✅ |
+| v0.1.6 | （误以为去掉 RC4 self-encrypt 是修，实际反了） | ⚠️ |
+| **v0.1.7** | **MPPE 加 base key 阶段，与 pppd 算法对齐** | ✅ 实证打通 |
+| **v0.1.8** | **VpnService setMetered(false) + 显式 /32 DNS 路由** | ✅ 当前版本 |
 | 未来 | 网络切换自动重连、kill-switch、多服务器配置 | — |
 
 ## 协议参考
