@@ -4,6 +4,33 @@
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-05-21
+
+### Fixed — MPPE 漏了 pppd 的 "initial rekey" 步骤
+
+v0.1.6 把 `nextKey` 里 RC4 self-encrypt 整个去掉，结果还是垃圾。
+根因不是 RC4 该不该做，而是 **客户端漏掉了一次初始 SHA1 旋转**。
+
+pppd 的实际流程（多个版本 mppe.c 源码确认）：
+
+1. `session_key = asymmetric_start_key` (SHA1 only，无 RC4)
+2. `mppe_init` 调用 `mppe_rekey(initial=1)`：做一次 SHA1（**不含 RC4**），结果记为 base
+3. 每发/收一个包前调用 `mppe_rekey(initial=0)`：再做一次 SHA1+RC4，得到该包用的密钥
+
+所以 cc=N 的包用的密钥 = asym 上做 **1 次 SHA1** + **N+1 次 SHA1+RC4** 旋转。
+
+我之前从 asym 开始直接每包旋转一次，**漏了 step 2 的那次"初始 SHA1"**。整个序列都比 pppd 少一次 SHA1 变换，所以两边密钥永远对不上。
+
+修复：
+- 新增 `sendBaseKey` / `recvBaseKey` = 在 asym 上做一次 SHA1-only 旋转（`sha1Only` 函数）
+- `sendCurrent` / `recvCurrent` 现在初始化为 base，不再是 init
+- `advanceRecvKeyTo` 首包从 base reset 然后旋转 cc+1 次（每次都是 SHA1+RC4）
+- `nextKey` 恢复 SHA1 + RC4 self-encrypt（v0.1.5 时是对的，v0.1.6 误删了）
+- `reset()` 把 sendCurrent 复位到 base（不是 init）
+
+### Diagnostics
+- 启动时 logcat 多打一行 base key 指纹 + cc=0 的会话密钥指纹（`MPPE first session keys (cc=0)`）。如果还是解不开，从这一行能判断算法是否再次走偏。
+
 ## [0.1.6] — 2026-05-21
 
 ### Fixed

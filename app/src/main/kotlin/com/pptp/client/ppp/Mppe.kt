@@ -44,18 +44,38 @@ class Mppe(
     val sendInitialKey: ByteArray = getAsymmetricStartKey(masterKey, KEY_LEN_BYTES, isSend = true, isServer = isServer)
     val recvInitialKey: ByteArray = getAsymmetricStartKey(masterKey, KEY_LEN_BYTES, isSend = false, isServer = isServer)
 
+    /**
+     * "Base" key after the one-time initial rekey (RFC 3078 §7.7 done with
+     * NO subsequent RC4, equivalent to pppd's `mppe_rekey(initial=1)`).
+     *
+     * pppd's flow:
+     *   1. session_key = asymmetric_start_key
+     *   2. mppe_rekey(initial=1): session_key = SHA1(asym || pad1 || asym || pad2)[0:16]
+     *      (no RC4 self-encrypt on initial rekey)
+     *   3. Per-packet mppe_rekey(initial=0):
+     *      InterimKey = SHA1(asym || pad1 || session_key || pad2)[0:16]
+     *      session_key = RC4(InterimKey, InterimKey)
+     *      (now used to encrypt this packet)
+     *
+     * So cc=N packet uses (1 SHA1) + (N+1 SHA1+RC4) rotations from asym.
+     * Earlier client missed step 2 → our key sequence was offset by one
+     * SHA1 transform from pppd's, breaking decryption irrecoverably.
+     */
+    private val sendBaseKey: ByteArray = sha1Only(sendInitialKey, sendInitialKey)
+    private val recvBaseKey: ByteArray = sha1Only(recvInitialKey, recvInitialKey)
+
     init {
-        // Print fingerprints (NOT full keys) so log can diagnose without exposing secrets.
         Log.i(TAG, "MPPE init: masterKey[0..3]=${prefix(masterKey)} sendInit=${prefix(sendInitialKey)} recvInit=${prefix(recvInitialKey)}")
-        val firstSend = nextKey(sendInitialKey, sendInitialKey)
-        val firstRecv = nextKey(recvInitialKey, recvInitialKey)
-        Log.i(TAG, "MPPE first session keys: send=${prefix(firstSend)} recv=${prefix(firstRecv)}")
+        Log.i(TAG, "MPPE base keys (after initial SHA1-only rekey): send=${prefix(sendBaseKey)} recv=${prefix(recvBaseKey)}")
+        val firstSend = nextKey(sendInitialKey, sendBaseKey)
+        val firstRecv = nextKey(recvInitialKey, recvBaseKey)
+        Log.i(TAG, "MPPE first session keys (cc=0): send=${prefix(firstSend)} recv=${prefix(firstRecv)}")
     }
 
     private fun prefix(k: ByteArray): String = k.take(4).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
 
-    private var sendCurrent: ByteArray = sendInitialKey.copyOf()
-    private var recvCurrent: ByteArray = recvInitialKey.copyOf()
+    private var sendCurrent: ByteArray = sendBaseKey.copyOf()
+    private var recvCurrent: ByteArray = recvBaseKey.copyOf()
 
     private var sendCC: Int = 0    // 12-bit coherency count (0..0xFFF)
     /** Last successfully-processed receive CC; -1 means "no packets yet". */
@@ -153,21 +173,21 @@ class Mppe(
      */
     private fun advanceRecvKeyTo(targetCc: Int) {
         if (lastRecvCc < 0) {
-            // First packet ever — rotate from init exactly targetCc+1 times.
-            recvCurrent = recvInitialKey.copyOf()
+            // First packet ever — reset to the "base" (post-initial-rekey) state,
+            // then rotate (targetCc + 1) per-packet SHA1+RC4 cycles so we land on
+            // the key the server used to encrypt this packet.
+            recvCurrent = recvBaseKey.copyOf()
             for (k in 0..targetCc) {
                 recvCurrent = nextKey(recvInitialKey, recvCurrent)
             }
             lastRecvCc = targetCc
             return
         }
-        // Forward delta within 12-bit space.
         val forwardDelta = (targetCc - lastRecvCc) and 0xFFF
-        // Detect backward jump: if forward distance is more than half the space, it
-        // is more efficient (and almost certainly correct) to restart from init.
         if (forwardDelta == 0) return // duplicate; key already aligned
         if (forwardDelta > 0x800) {
-            recvCurrent = recvInitialKey.copyOf()
+            // Backward jump (server reset / CC wrap). Restart from base.
+            recvCurrent = recvBaseKey.copyOf()
             for (k in 0..targetCc) {
                 recvCurrent = nextKey(recvInitialKey, recvCurrent)
             }
@@ -189,7 +209,7 @@ class Mppe(
      */
     @Synchronized
     fun reset() {
-        sendCurrent = sendInitialKey.copyOf()
+        sendCurrent = sendBaseKey.copyOf()
         sendCC = 0
         // NOTE: deliberately do NOT touch recvCurrent / lastRecvCc. The server
         // doesn't reset its sender on receiving our Reset-Request; it just
@@ -257,20 +277,32 @@ class Mppe(
         }
 
         /**
-         * RFC 3078 §7.7 GetNewKeyFromSHA — used both for changing keys
-         * stateless-per-packet and for the stateful re-key after 256 packets.
+         * Per-packet rekey, equivalent to pppd's `mppe_rekey(initial=0)`.
          *
-         * For 128-bit MPPE the new key is simply SHA1(InitialKey || pad1 ||
-         * CurrentKey || pad2) truncated to 16 bytes.
+         *   InterimKey = SHA1(InitialKey || pad1 || CurrentKey || pad2)[0:keyLen]
+         *   NewKey     = RC4(InterimKey, InterimKey)
          *
-         * v0.1.5 mistakenly added a "RC4(sha, sha) → final key" step here.
-         * That step belongs to RFC 3078 §7.8 ("Reducing the SessionKey Size")
-         * and applies ONLY to 40/56-bit keys to weaken them; 128-bit keeps
-         * the SHA1 output directly. The extra RC4 self-encrypt made our keys
-         * disagree with the server's by one RC4 transform — both directions
-         * decrypted to garbage.
+         * RFC 3078 §7.7 documents only the SHA1 half; the RC4 self-encrypt
+         * step is implemented by pppd / Microsoft RRAS / accel-ppp for every
+         * key length (the spec mentions it only in the 40/56-bit reduction
+         * section, but the wire-format requires this self-encrypt for
+         * interop with the dominant implementations).
          */
         fun nextKey(initialKey: ByteArray, currentKey: ByteArray): ByteArray {
+            val keyLen = initialKey.size
+            val sha = Crypto.sha1(initialKey, PAD1, currentKey, PAD2).copyOfRange(0, keyLen)
+            val rc4 = Rc4(sha)
+            val out = sha.copyOf()
+            rc4.process(out)
+            return out
+        }
+
+        /**
+         * The "initial rekey" form pppd uses once during `mppe_init`, before
+         * any packet has been processed. Same SHA1 as [nextKey] but WITHOUT
+         * the final RC4 self-encrypt.
+         */
+        fun sha1Only(initialKey: ByteArray, currentKey: ByteArray): ByteArray {
             val keyLen = initialKey.size
             return Crypto.sha1(initialKey, PAD1, currentKey, PAD2).copyOfRange(0, keyLen)
         }
