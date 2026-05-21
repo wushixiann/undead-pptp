@@ -44,6 +44,16 @@ class Mppe(
     val sendInitialKey: ByteArray = getAsymmetricStartKey(masterKey, KEY_LEN_BYTES, isSend = true, isServer = isServer)
     val recvInitialKey: ByteArray = getAsymmetricStartKey(masterKey, KEY_LEN_BYTES, isSend = false, isServer = isServer)
 
+    init {
+        // Print fingerprints (NOT full keys) so log can diagnose without exposing secrets.
+        Log.i(TAG, "MPPE init: masterKey[0..3]=${prefix(masterKey)} sendInit=${prefix(sendInitialKey)} recvInit=${prefix(recvInitialKey)}")
+        val firstSend = nextKey(sendInitialKey, sendInitialKey)
+        val firstRecv = nextKey(recvInitialKey, recvInitialKey)
+        Log.i(TAG, "MPPE first session keys: send=${prefix(firstSend)} recv=${prefix(firstRecv)}")
+    }
+
+    private fun prefix(k: ByteArray): String = k.take(4).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
     private var sendCurrent: ByteArray = sendInitialKey.copyOf()
     private var recvCurrent: ByteArray = recvInitialKey.copyOf()
 
@@ -78,6 +88,9 @@ class Mppe(
         out[0] = flagsAndCcHi.toByte()
         out[1] = ccLo.toByte()
         System.arraycopy(encrypted, 0, out, 2, encrypted.size)
+        if (cc < 4) {
+            Log.i(TAG, "MPPE encrypt cc=$cc key=${prefix(sendCurrent)} plain[0..3]=${prefix(pppProtoAndPayload)}")
+        }
         return out
     }
 
@@ -122,6 +135,10 @@ class Mppe(
         val rc4 = Rc4(recvCurrent)
         val payload = packet.copyOfRange(2, packet.size)
         rc4.process(payload)
+        if (cc < 4) {
+            // Log the first few packets so we can verify the decrypt key alignment.
+            Log.i(TAG, "MPPE decrypt cc=$cc key=${prefix(recvCurrent)} → first4=${prefix(payload)}")
+        }
         return payload
     }
 
@@ -242,18 +259,20 @@ class Mppe(
         /**
          * RFC 3078 §7.7 GetNewKeyFromSHA — used both for changing keys
          * stateless-per-packet and for the stateful re-key after 256 packets.
+         *
+         * For 128-bit MPPE the new key is simply SHA1(InitialKey || pad1 ||
+         * CurrentKey || pad2) truncated to 16 bytes.
+         *
+         * v0.1.5 mistakenly added a "RC4(sha, sha) → final key" step here.
+         * That step belongs to RFC 3078 §7.8 ("Reducing the SessionKey Size")
+         * and applies ONLY to 40/56-bit keys to weaken them; 128-bit keeps
+         * the SHA1 output directly. The extra RC4 self-encrypt made our keys
+         * disagree with the server's by one RC4 transform — both directions
+         * decrypted to garbage.
          */
         fun nextKey(initialKey: ByteArray, currentKey: ByteArray): ByteArray {
             val keyLen = initialKey.size
-            // Per RFC 3078: SHA1(InitialKey || pad1 || CurrentKey || pad2)[0:keyLen]
-            // After SHA, the result is "RC4-encrypted" with itself as a key to
-            // produce the final new key. (See §7.7 step 4.)
-            val sha = Crypto.sha1(initialKey, PAD1, currentKey, PAD2).copyOfRange(0, keyLen)
-            // Final step: RC4(sha, sha) — encrypt the digest with itself as key.
-            val rc4 = Rc4(sha)
-            val out = sha.copyOf()
-            rc4.process(out)
-            return out
+            return Crypto.sha1(initialKey, PAD1, currentKey, PAD2).copyOfRange(0, keyLen)
         }
     }
 }

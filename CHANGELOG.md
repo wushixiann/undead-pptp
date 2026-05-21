@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-05-21
+
+### Fixed
+- **`nextKey` 去掉多余的 RC4 self-encrypt**：之前在 SHA1 输出之后又做了一遍 `RC4(sha, sha)`。重读 RFC 3078 §7.7 / §7.8：RC4 self-encrypt 只在 §7.8 「Reducing the SessionKey Size」里出现，**仅对 40/56-bit 弱化密钥使用**；128-bit 模式直接用 SHA1 截断后的结果。我们多做了这一步，等同于客户端做了一次 RC4 变换、服务器没做，密钥永远差一个 RC4 变换的距离 —— 双向解密都是垃圾。
+
+### Added (Diagnostics)
+- MPPE 初始化打印 master key / send-init / recv-init 的前 4 字节指纹到 logcat (`Mppe:I` tag)
+- encrypt / decrypt 前 4 个 cc 的密钥与首 4 字节明文都会打到 logcat，方便比对算法对齐
+
+如果这版仍解不开，请贴 `adb logcat -s Mppe:V PptpSession:V Lcp:V Ccp:V` 输出 —— 我们能从首轮密钥指纹判断算法是否真的对齐。
+
 ## [0.1.5] — 2026-05-21
 
 ### Fixed (critical) — MPPE 加解密双向失效
