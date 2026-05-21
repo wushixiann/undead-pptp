@@ -4,6 +4,34 @@
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-05-21
+
+### Fixed (critical) — MPPE 加解密双向失效
+
+实战发现 LCP/Auth/IPCP 全部成功，TUN 也建立了，但 MPPE 解密产物 inner protocol 永远是随机值（0x98c1, 0xa422, ...），同时服务器一直发 CCP Reset-Request。原因是两个独立的 bug 凑齐了：
+
+**Bug 1：encrypt 写错 flag byte**
+- 写的是 `0xA0` (A=1, **C=1**, D=0)
+- 正确应该是 `0x90` (A=1, **D=1**)
+- 我把 D bit 位置和 C bit 位置弄反了：RFC 3078 §2 layout 是 `ABCD` 占 byte 0 的高 4 位，D 是 bit 4 = 0x10
+- 后果：服务器收到我们的包看到 D=0 → 不解密；C=1 → 当成 MPPC 压缩数据；自然解析失败 → 一路发 Reset-Request
+
+**Bug 2：decrypt 用错密钥位置**
+- stateless MPPE 的关键约定：cc=N 的包用 init 旋转 N+1 次之后的密钥；服务器和客户端各自从自己的 cc 计数派生密钥
+- 原 decrypt：不管首包 cc 是几，都只旋转 1 次密钥
+- 结果：如果第一个收到的包 cc≠0（这在服务器 reset 后 cc 飘走、或我们错过早期包时一定会发生），永远拿不到正确密钥 → 解密产物是垃圾
+
+  改成：维护 `lastRecvCc`，按收到的 cc 直接派生密钥（首包从 init 旋转 cc+1 次，后续按增量旋转）。彻底脱离"必须从 0 开始按序到达"的脆弱前提。
+
+**Bug 3 (附带)：reset() 把 recv 状态也清了**
+- 收到 CCP Reset-Request 时之前的 reset() 把 sendCC / recvCurrent / lastRecvCc 全部清零
+- 但服务器收到 Reset-Request 后不会重启自己的 send 计数 —— 它只 reset 它的 recv 状态
+- 所以我们 recv 状态本就不该跟着重置；现在 reset() 只复位 send，recv 用 advanceRecvKeyTo() 自动跟服务器的 cc 对齐
+
+### 期望效果
+
+修复后流程应该走到 Connected 阶段并保持稳定；UI 中 GRE RX 计数应当随访问外网持续增长；不再看到 "MPPE inner protocol 0x????" 日志（除非协议确实非 0x0021）。如果还是断，请贴新日志（特别是 LCP TerminateRequest 之前的 30 秒）。
+
 ## [0.1.4] — 2026-05-21
 
 ### Fixed (critical)

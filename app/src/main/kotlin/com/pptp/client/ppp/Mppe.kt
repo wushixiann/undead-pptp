@@ -48,8 +48,8 @@ class Mppe(
     private var recvCurrent: ByteArray = recvInitialKey.copyOf()
 
     private var sendCC: Int = 0    // 12-bit coherency count (0..0xFFF)
-    private var expectedRecvCC: Int = 0
-    private var initial: Boolean = true
+    /** Last successfully-processed receive CC; -1 means "no packets yet". */
+    private var lastRecvCc: Int = -1
 
     @Volatile var lastReceivedCC: Int = -1
         private set
@@ -65,8 +65,14 @@ class Mppe(
         val cc = sendCC
         sendCC = (sendCC + 1) and 0xFFF
 
-        // Header: A=1 (flushed), B=0, C=0, D=1 (encrypted), then 12-bit CC
-        val flagsAndCcHi = ((0xA0 or ((cc shr 8) and 0x0F)) and 0xFF)
+        // Header byte 0 layout (RFC 3078 §2): A B C D CC11 CC10 CC9 CC8
+        //   A (0x80) = Flushed   — required every packet in stateless mode
+        //   B (0x40) = unused for MPPE-only (was MPPC-specific)
+        //   C (0x20) = unused
+        //   D (0x10) = Encrypted — must be 1, otherwise server treats payload as plaintext
+        // We must set A | D = 0x90. Earlier code wrote 0xA0 (A | C) which left D=0,
+        // causing servers to mis-interpret our packets as MPPC-compressed plaintext.
+        val flagsAndCcHi = ((0x90 or ((cc shr 8) and 0x0F)) and 0xFF)
         val ccLo = cc and 0xFF
         val out = ByteArray(2 + encrypted.size)
         out[0] = flagsAndCcHi.toByte()
@@ -76,8 +82,17 @@ class Mppe(
     }
 
     /**
-     * Decrypt an MPPE-encrypted packet. Returns null on coherency gap (caller
-     * should then send CCP Reset-Request and drop the packet).
+     * Decrypt an MPPE-encrypted packet.
+     *
+     * The key for a packet with coherency count cc is the initial key rotated
+     * (cc + 1) times. Earlier code rotated once per receive — which assumes
+     * sequential, unbroken stream starting at cc=0. After a CCP Reset-Request
+     * the server's CC continues from wherever it was, but our state was
+     * starting from scratch each time → guaranteed key mismatch and garbage
+     * decryption. We now derive the key from cc directly, with an incremental
+     * cache so the common sequential case stays cheap.
+     *
+     * Returns null on truly malformed packets.
      */
     @Synchronized
     fun decrypt(packet: ByteArray): ByteArray? {
@@ -91,41 +106,19 @@ class Mppe(
         val flushed = flagsCcHi and 0x80 != 0
         val encrypted = flagsCcHi and 0x10 != 0
         if (!encrypted) {
-            Log.w(TAG, "MPPE D bit not set — packet not encrypted?")
+            Log.w(TAG, "MPPE D bit not set (flags=0x${"%02x".format(flagsCcHi)}) — dropping")
             return null
         }
         lastReceivedCC = cc
 
-        // In stateless mode every packet must have A (flushed) set. If not,
-        // the peer is sending stateful — we drop and request reset.
+        // Stateless requires Flushed on every packet; tolerate but warn if missing
+        // (some non-strict implementations vary).
         if (!flushed) {
-            Log.w(TAG, "MPPE packet without Flushed bit — stateful mode? Dropping.")
-            return null
+            Log.w(TAG, "MPPE packet without A bit (cc=$cc) — treating as stateless anyway")
         }
 
-        // Coherency check
-        if (initial) {
-            expectedRecvCC = cc
-            initial = false
-        }
-        if (cc != expectedRecvCC) {
-            Log.w(TAG, "MPPE coherency gap: expected=$expectedRecvCC got=$cc — re-syncing")
-            // For stateless, we resync the key for this packet:
-            // need to rotate recvCurrent from initial until it matches the gap.
-            val delta = ((cc - expectedRecvCC) and 0xFFF)
-            for (k in 0..delta) {
-                recvCurrent = nextKey(recvInitialKey, recvCurrent)
-            }
-            expectedRecvCC = (cc + 1) and 0xFFF
-            // Decrypt with this re-keyed RC4 (already rotated to current cc above).
-            val rc4 = Rc4(recvCurrent)
-            val payload = packet.copyOfRange(2, packet.size)
-            rc4.process(payload)
-            return payload
-        }
+        advanceRecvKeyTo(cc)
 
-        recvCurrent = nextKey(recvInitialKey, recvCurrent)
-        expectedRecvCC = (expectedRecvCC + 1) and 0xFFF
         val rc4 = Rc4(recvCurrent)
         val payload = packet.copyOfRange(2, packet.size)
         rc4.process(payload)
@@ -133,15 +126,58 @@ class Mppe(
     }
 
     /**
+     * Rotate recvCurrent so it equals init rotated (targetCc + 1) times.
+     *
+     * Stateless MPPE: server's send key for the packet wire-tagged with cc is
+     * derived by starting from the initial key and applying [nextKey] exactly
+     * cc+1 times. We cache the most recent (cc, key) pair and only rotate
+     * forward; on backward jumps (rare after CC wrap, or server reset) we
+     * restart from the initial key and rotate up.
+     */
+    private fun advanceRecvKeyTo(targetCc: Int) {
+        if (lastRecvCc < 0) {
+            // First packet ever — rotate from init exactly targetCc+1 times.
+            recvCurrent = recvInitialKey.copyOf()
+            for (k in 0..targetCc) {
+                recvCurrent = nextKey(recvInitialKey, recvCurrent)
+            }
+            lastRecvCc = targetCc
+            return
+        }
+        // Forward delta within 12-bit space.
+        val forwardDelta = (targetCc - lastRecvCc) and 0xFFF
+        // Detect backward jump: if forward distance is more than half the space, it
+        // is more efficient (and almost certainly correct) to restart from init.
+        if (forwardDelta == 0) return // duplicate; key already aligned
+        if (forwardDelta > 0x800) {
+            recvCurrent = recvInitialKey.copyOf()
+            for (k in 0..targetCc) {
+                recvCurrent = nextKey(recvInitialKey, recvCurrent)
+            }
+        } else {
+            for (k in 0 until forwardDelta) {
+                recvCurrent = nextKey(recvInitialKey, recvCurrent)
+            }
+        }
+        lastRecvCc = targetCc
+    }
+
+    /**
      * Reset the send/recv state. Called when a CCP Reset-Request is processed.
+     *
+     * The send side restarts from init at cc=0. The receive side does NOT
+     * unilaterally restart — the server keeps using its own CC counter, so
+     * we discover its current CC from the next incoming packet's wire value
+     * and [advanceRecvKeyTo] handles the realignment automatically.
      */
     @Synchronized
     fun reset() {
         sendCurrent = sendInitialKey.copyOf()
-        recvCurrent = recvInitialKey.copyOf()
         sendCC = 0
-        expectedRecvCC = 0
-        initial = true
+        // NOTE: deliberately do NOT touch recvCurrent / lastRecvCc. The server
+        // doesn't reset its sender on receiving our Reset-Request; it just
+        // re-syncs its receiver. Touching recv state here was the bug that
+        // made every subsequent decrypt produce garbage.
     }
 
     companion object {
