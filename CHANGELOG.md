@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-21
+
+### Fixed — MPPE 内层 PPP 协议字段 PFC 解析
+
+用户确认 Windows PPTP 在同一网络同一服务器能正常浏览网页，所以服务器 MSS clamping、forwarding 都没问题，bug 在客户端。
+
+排查到 `handleMppeRx` 总是按 2 字节读 inner PPP 协议字段，但 LCP 协商时我们 ACK 了服务器的 **Protocol-Field-Compression (PFC)** 选项。如果服务器对 inner PPP 帧也启用 PFC 压缩，IPv4 协议字段会变成单字节 `0x21` 而不是双字节 `0x00 0x21`。原代码读两字节得到 `0x21XX`（XX 是 IPv4 首字节 0x45 的影子），整个 IPv4 包向后偏移一字节，kernel 看到 IPv4 头格式不对就静默丢包。
+
+ICMP echo reply 因为对包结构相对宽容，**有时**能侥幸过；TCP 对头部完整性极严格，PFC 偏移 1 字节就 100% 失败。这解释了 "ping 通但 TCP 不通"。
+
+修复：用 PppFrame.decode 同样的 PFC 检测（首字节低位为 1 → 单字节协议字段）。
+
+### Improved diagnostics
+- "MPPE inner protocol 0x????  ignored" 日志加上字节数，方便看包大小分布
+
 ## [0.1.9] — 2026-05-21
 
 ### Fixed

@@ -432,12 +432,27 @@ class PptpSession(
             ccp?.sendResetRequest()
             return
         }
-        if (plain.size < 2) return
-        val innerProto = ((plain[0].toInt() and 0xFF) shl 8) or (plain[1].toInt() and 0xFF)
-        val innerPayload = plain.copyOfRange(2, plain.size)
+        if (plain.isEmpty()) return
+
+        // The inner PPP frame may carry a PFC-compressed protocol field (1 byte
+        // instead of 2) when LCP negotiated Protocol-Field-Compression. RFC 1661
+        // §6.5: if the low bit of byte 0 is 1, the protocol is one byte.
+        // ICMP echo replies happened to survive previous byte-misalignment with
+        // some luck, but TCP packets do not — the inner IPv4 header gets shifted
+        // by one byte, the kernel sees corrupted L4 headers, and silently drops.
+        val innerProto: Int
+        val innerPayload: ByteArray
+        if (plain[0].toInt() and 0x01 == 0x01) {
+            innerProto = plain[0].toInt() and 0xFF
+            innerPayload = plain.copyOfRange(1, plain.size)
+        } else {
+            if (plain.size < 2) return
+            innerProto = ((plain[0].toInt() and 0xFF) shl 8) or (plain[1].toInt() and 0xFF)
+            innerPayload = plain.copyOfRange(2, plain.size)
+        }
         when (innerProto) {
-            PppProtocol.IPV4 -> tunDeliver?.invoke(innerPayload)
-            else -> Log.d(TAG, "MPPE inner protocol ${"0x%04x".format(innerProto)} ignored")
+            PppProtocol.IPV4 -> tunDeliver?.invoke(innerPayload) // 0x0021 == 0x21 in Int
+            else -> Log.d(TAG, "MPPE inner protocol ${"0x%04x".format(innerProto)} ignored (${innerPayload.size}B)")
         }
     }
 
