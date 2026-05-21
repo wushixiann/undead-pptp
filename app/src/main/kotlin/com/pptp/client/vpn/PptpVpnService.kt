@@ -13,9 +13,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -98,6 +100,20 @@ class PptpVpnService : VpnService() {
             }
         }
         scope.launch { sess.lastError.collect { err -> state.value = state.value.copy(lastError = err) } }
+        // Poll bridge counters once a second so the UI can show whether GRE
+        // packets are actually getting back from the wire — vital for diagnosing
+        // cellular black-holing / NAT mishaps in the field.
+        scope.launch {
+            while (isActive) {
+                val s = sess
+                state.value = state.value.copy(
+                    iface = s.underlayInterface(),
+                    greTx = s.bridgeTxCount(),
+                    greRx = s.bridgeRxCount(),
+                )
+                delay(1000)
+            }
+        }
         try {
             sess.connect(host, port, user, pass)
         } catch (e: Throwable) {
@@ -192,6 +208,9 @@ class PptpVpnService : VpnService() {
         val localIp: String = "",
         val peerIp: String = "",
         val mppeActive: Boolean = false,
+        val iface: String = "",
+        val greTx: Int = 0,
+        val greRx: Int = 0,
         val lastError: String? = null,
     )
 

@@ -117,6 +117,12 @@ class PptpSession(
     fun negotiatedAuth(): AuthChoice? = lcp?.negotiatedAuth
     fun ipcpLocalConfig(): IpcpStateMachine.LocalConfig? = ipcp?.localConfig
     fun ipcpPeerConfig(): IpcpStateMachine.PeerConfig? = ipcp?.peerConfig
+    fun bridgeTxCount(): Int = bridge?.txCount?.value ?: 0
+    fun bridgeRxCount(): Int = bridge?.rxCount?.value ?: 0
+    fun underlayInterface(): String = chosenIface
+    fun peerIp(): String = ipFormat(peerIpv4Int)
+
+    @Volatile private var chosenIface: String = ""
 
     /**
      * Bind the TUN delivery callback after the caller (typically VpnService)
@@ -184,6 +190,7 @@ class PptpSession(
 
         _phase.value = Phase.BridgeStarting
         val iface = NetworkUtil.activeUnderlayInterface(context) ?: "wlan0"
+        chosenIface = iface
         val br = when (val r = HelperLifecycle.startBridge(
             context, iface,
             onHelperExit = { code, out ->

@@ -4,6 +4,36 @@
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-21
+
+### Added (Diagnostics)
+
+第一次实战发现 LCP ConfReq 在蜂窝网 (rmnet1) 上无响应。可能原因是
+运营商封锁 IP 协议 47 (GRE) 或 CGNAT 无法回程，需要更多观测数据。
+加一组诊断面板帮助现场定位：
+
+- **UdsBridge 加 `txCount` / `rxCount` StateFlow**：累计统计 app↔helper
+  之间过帧数。RX 一直为 0 意味着 helper 收不到任何 GRE 回包
+- **PptpVpnService.State 暴露 iface / greTx / greRx**，每秒刷新一次
+- **UI 第 ④ 区显示**：
+  - 底层接口名（rmnet*/ccmni* 自动标红警告"蜂窝网常封 GRE"）
+  - GRE TX/RX 计数；TX>3 且 RX=0 时标红"发出去没回包"
+- **Helper 接 liblog**：bridge 启动、sendto 错误、每 5s 一次 TX/RX
+  统计走 logcat
+  - `adb logcat -s pptp_helper:V` 即可看实时统计与错误
+  - sendto 失败时打印 errno + peer IP + len
+  - 退出时打印最终统计
+
+### Diagnosis Guide
+
+- TX=0, RX=0 → app→helper UDS 桥不通（应当不会，bridge 已 Connected）
+- TX>0, RX=0 → helper 在发 GRE，但没收到回包：
+  - 运营商封 IP 协议 47（蜂窝网常见）
+  - CGNAT 吃了回程（GRE 无端口，NAT 无法跟踪反向流）
+  - 服务器没收到，或收到了但没回（需要服务器侧 `tcpdump -i any proto gre` 验证）
+- TX>0, RX>0 但 LCP 还卡 ReqSent → 收到的包 Call-ID 不匹配
+  （bug 在 GreFrame/PptpSession 里 — 这种情况贴出 logcat 让我看）
+
 ## [0.1.2] — 2026-05-21
 
 ### Fixed

@@ -30,6 +30,8 @@ target_compile_options(pptp_helper PRIVATE
         -fstack-protector-strong
 )
 
+target_link_libraries(pptp_helper PRIVATE log)
+
 target_link_options(pptp_helper PRIVATE
         -pie
         -Wl,-z,relro

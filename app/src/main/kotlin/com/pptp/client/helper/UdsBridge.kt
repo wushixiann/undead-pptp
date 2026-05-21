@@ -45,6 +45,14 @@ class UdsBridge {
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    /** Cumulative frame counts. Surface to UI so the user can confirm whether
+     *  the data plane is actually carrying packets in both directions. */
+    private val _txCount = MutableStateFlow(0)
+    val txCount: StateFlow<Int> = _txCount.asStateFlow()
+
+    private val _rxCount = MutableStateFlow(0)
+    val rxCount: StateFlow<Int> = _rxCount.asStateFlow()
+
     /** Frames received from the helper (raw socket → UDS direction). */
     val received: Channel<UdsFrame> = Channel(capacity = 64)
 
@@ -98,6 +106,7 @@ class UdsBridge {
                 while (isActive) {
                     val frame = outbound.receive()
                     UdsFrameCodec.write(output, frame)
+                    _txCount.value = _txCount.value + 1
                 }
             } catch (e: Throwable) {
                 if (isActive) Log.w(TAG, "tx worker ended", e)
@@ -116,6 +125,7 @@ class UdsBridge {
                     // EOF — helper has closed.
                     break
                 }
+                _rxCount.value = _rxCount.value + 1
                 // trySend so we don't block the IO thread if app consumer is slow.
                 received.trySend(frame)
             }

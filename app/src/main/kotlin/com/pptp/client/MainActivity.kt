@@ -495,6 +495,24 @@ private fun SessionSection() {
         style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(8.dp))
     Text("阶段: ${state.phase}", fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    if (state.iface.isNotEmpty()) {
+        val ifaceWarn = state.iface.startsWith("rmnet") || state.iface.startsWith("ccmni")
+        Text(
+            "底层接口: ${state.iface}" +
+                if (ifaceWarn) "  ⚠️ 蜂窝网常封 GRE，建议切 WiFi" else "",
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+            color = if (ifaceWarn) Color(0xFFB71C1C) else Color.Unspecified,
+        )
+    }
+    if (state.greTx > 0 || state.greRx > 0) {
+        val rxStalled = state.greTx > 3 && state.greRx == 0
+        Text(
+            "GRE: TX=${state.greTx}  RX=${state.greRx}" +
+                if (rxStalled) "  ⚠️ 发出去没回包" else "",
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+            color = if (rxStalled) Color(0xFFB71C1C) else Color.Unspecified,
+        )
+    }
     if (state.localIp.isNotEmpty()) {
         Text(
             "TUN 已建立：本端 ${state.localIp}  对端 ${state.peerIp}",

@@ -29,6 +29,7 @@
  * Stages: socket | bindtodevice | uds-socket | uds-connect | recv | send.
  */
 
+#include <android/log.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -44,7 +45,13 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
+
+#define LTAG "pptp_helper"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LTAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LTAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LTAG, __VA_ARGS__)
 
 #ifndef IPPROTO_GRE
 #define IPPROTO_GRE 47
@@ -204,6 +211,12 @@ static int run_bridge(const char *iface, const char *uds_path) {
     fprintf(stdout, "OK bridge %s\n", iface);
     fflush(stdout);
     fprintf(stderr, "pptp_helper: bridge up on %s via %s\n", iface, uds_path);
+    LOGI("bridge up on %s via %s", iface, uds_path);
+
+    /* Per-direction counters surfaced to logcat every 5 s for live diagnosis. */
+    uint64_t tx_packets = 0, tx_errors = 0;
+    uint64_t rx_packets = 0, rx_errors = 0;
+    time_t last_report = time(NULL);
 
     struct pollfd pfd[2];
     pfd[0].fd = uds;
@@ -260,7 +273,12 @@ static int run_bridge(const char *iface, const char *uds_path) {
                                            (struct sockaddr *) &dst, sizeof(dst));
                         if (s < 0) {
                             int e = errno;
+                            tx_errors++;
                             fprintf(stderr, "pptp_helper: sendto errno=%d (%s)\n", e, strerror(e));
+                            LOGW("sendto failed errno=%d (%s) peer=0x%08x len=%u",
+                                 e, strerror(e), peer, len);
+                        } else {
+                            tx_packets++;
                         }
                     }
                     off += UDS_FRAME_HDR + len;
@@ -289,6 +307,7 @@ static int run_bridge(const char *iface, const char *uds_path) {
                     break;
                 }
             } else if (r > 0 && r <= 0xFFFF) {
+                rx_packets++;
                 uint8_t hdr[UDS_FRAME_HDR];
                 uint32_t src = ntohl(from.sin_addr.s_addr);
                 hdr[0] = (uint8_t) (src >> 24);
@@ -305,6 +324,7 @@ static int run_bridge(const char *iface, const char *uds_path) {
                 ssize_t w = writev(uds, iov, 2);
                 if (w < 0) {
                     if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                        rx_errors++;
                         report_errno("send");
                         rc = 1;
                         break;
@@ -316,8 +336,19 @@ static int run_bridge(const char *iface, const char *uds_path) {
             fprintf(stderr, "pptp_helper: raw socket hangup\n");
             break;
         }
+
+        time_t now = time(NULL);
+        if (now - last_report >= 5) {
+            LOGI("stats tx=%llu (errs=%llu)  rx=%llu (errs=%llu)",
+                 (unsigned long long) tx_packets, (unsigned long long) tx_errors,
+                 (unsigned long long) rx_packets, (unsigned long long) rx_errors);
+            last_report = now;
+        }
     }
 
+    LOGI("bridge exiting; final stats tx=%llu (errs=%llu) rx=%llu (errs=%llu)",
+         (unsigned long long) tx_packets, (unsigned long long) tx_errors,
+         (unsigned long long) rx_packets, (unsigned long long) rx_errors);
     close(uds);
     close(raw);
     return rc;
