@@ -113,18 +113,27 @@ class CcpStateMachine(
         val ack = mutableListOf<LcpOption>()
         val nak = mutableListOf<LcpOption>()
         val rej = mutableListOf<LcpOption>()
+        // The only bitset we can interoperate with: MPPE-128 stateless,
+        // NO MPPC compression, NO 40/56-bit fallback, NO obsolete D bit.
+        val acceptable = FLAG_128_BIT or FLAG_STATELESS
         for (o in opts) {
             when (o.type) {
                 OPTION_MPPE -> {
                     if (o.value.size != 4) { rej.add(o); continue }
                     val flags = ByteBuffer.wrap(o.value).order(ByteOrder.BIG_ENDIAN).int
-                    val wants128 = flags and FLAG_128_BIT != 0
-                    val wantsStateless = flags and FLAG_STATELESS != 0
-                    if (wants128 && wantsStateless) {
+                    if (flags == acceptable) {
+                        // Exact match — Ack as-is per RFC 1661.
                         ack.add(o)
                     } else {
-                        // Nak with our preferred bitmask.
-                        nak.add(mppeOption(FLAG_128_BIT or FLAG_STATELESS))
+                        // Any deviation (peer wants compression / different key size /
+                        // stateful) → Nak with our preferred bitset. ACKing as-is when
+                        // peer set the C (MPPC compression) bit was the v0.2.0 bug:
+                        // it made the server compress packets after encryption, while
+                        // we only un-encrypted; the "inner protocol" was actually
+                        // a byte from MPPC compression header → looks like garbage
+                        // (or like a high-byte=0x00 mystery protocol).
+                        Log.w(TAG, "peer MPPE bits ${"0x%08x".format(flags)} ≠ wanted ${"0x%08x".format(acceptable)}; nak")
+                        nak.add(mppeOption(acceptable))
                     }
                 }
                 else -> rej.add(o)
@@ -214,11 +223,21 @@ class CcpStateMachine(
         const val CODE_RESET_ACK = 15
         const val OPTION_MPPE = 18
 
-        // RFC 3078 MPPE bitmask bits (in network/big-endian 4-byte field).
-        const val FLAG_STATELESS = 0x01000000  // bit S
-        const val FLAG_40_BIT    = 0x00000020  // bit L
-        const val FLAG_56_BIT    = 0x00000080
-        const val FLAG_128_BIT   = 0x00000040  // bit H
+        // RFC 3078 MPPE/MPPC bitmask bits (in network/big-endian 4-byte field).
+        // Wire format byte layout (4 bytes BE):
+        //   byte 0: bit 0 (LSB) = S (stateless)  → 0x01000000
+        //   byte 3:
+        //     bit 7 (MSB) = M (56-bit)            → 0x00000080
+        //     bit 6        = H (128-bit)           → 0x00000040
+        //     bit 5        = L (40-bit)            → 0x00000020
+        //     bit 4        = D (obsolete)          → 0x00000010
+        //     bit 0 (LSB)  = C (MPPC compression)  → 0x00000001
+        const val FLAG_STATELESS = 0x01000000  // S
+        const val FLAG_56_BIT    = 0x00000080  // M
+        const val FLAG_128_BIT   = 0x00000040  // H
+        const val FLAG_40_BIT    = 0x00000020  // L
+        const val FLAG_OBSOLETE  = 0x00000010  // D
+        const val FLAG_MPPC      = 0x00000001  // C — MPPC compression (we do NOT support)
 
         fun mppeOption(flags: Int): LcpOption {
             val v = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(flags).array()

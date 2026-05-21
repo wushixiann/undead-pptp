@@ -155,9 +155,16 @@ class Mppe(
         val rc4 = Rc4(recvCurrent)
         val payload = packet.copyOfRange(2, packet.size)
         rc4.process(payload)
-        if (cc < 4) {
-            // Log the first few packets so we can verify the decrypt key alignment.
-            Log.i(TAG, "MPPE decrypt cc=$cc key=${prefix(recvCurrent)} → first4=${prefix(payload)}")
+        if (cc < 8) {
+            // First few packets: full 8-byte plaintext dump so we can verify
+            // the bytes themselves (not just the protocol parse). For a correct
+            // IPv4 decryption we expect either:
+            //   [0x00 0x21 0x45 .. ..]  — full 2-byte protocol form
+            //   [0x21 0x45 0x00 .. ..]  — PFC-compressed protocol form
+            // Anything else means the key is still wrong OR the data was
+            // compressed (MPPC) before encryption (server agreed to C bit).
+            val dump = payload.take(8).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+            Log.i(TAG, "MPPE decrypt cc=$cc key=${prefix(recvCurrent)} → first8=$dump")
         }
         return payload
     }

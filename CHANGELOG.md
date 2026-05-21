@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-21
+
+### Fixed — CCP 接受了 MPPC 压缩位（C bit）
+
+v0.2.0 装上后 ping/IP 偶尔通，浏览器持续失败；解密后的 inner protocol 30%+ 是 `0x00XX`（低字节奇数）的奇怪值，30%+ 是高位随机字节。这不是 RC4 keystream 不对齐（那会是均匀随机），而是有结构。
+
+原因：CCP 协商时收到服务器的 MPPE 选项 (类型 18)，我只检查了 H (128-bit) + S (stateless) 是否都置位，**就把服务器原始 4 字节 ACK 回去**。如果服务器同时设了 C bit (0x00000001, MPPC compression)，等于跟我说"我要压缩+加密都开"，然后服务器先 MPPC 压缩、再 MPPE 加密。我只解了加密、没解压缩 → 看到的就是 MPPC 流头部那些 `0x00XX` 字段。
+
+修复：CCP ACK 严格只接受 `H + S` 完全匹配的位集；任何额外的位（C / D / L / M / Stateful）都 NAK 回去带上我们能接受的组合，强制服务器降级到纯加密。
+
+### Diagnostics
+- 解密日志改成前 8 字节 hex dump 而不是协议字段。下次能看到 `00214500...`（正确 IPv4）还是 `00xx...`（MPPC 头）就一目了然。
+
+### Notes 给用户
+新版装上重新连，logcat 里第一批 MPPE decrypt 应该长这样:
+- 期待: `MPPE decrypt cc=0 ... first8=00214500...` (0x00 0x21 = IPv4 协议; 0x45 = IPv4 头第一字节)
+- 还错: `00cb88...` 之类 → 把 logcat 完整贴过来再看
+
 ## [0.2.0] — 2026-05-21
 
 ### Fixed — MPPE 内层 PPP 协议字段 PFC 解析
