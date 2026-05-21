@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-21
+
+### Fixed
+- **16 KB page-size 兼容**：CMakeLists.txt 加 `-Wl,-z,max-page-size=16384` 与 `-Wl,-z,common-page-size=16384` 链接器标志。Android 15+ 部分设备运行在 16 KB 内存页下，不带这个对齐的 .so 在它们上加载会失败。NDK r26c+ 在 API 35+ 默认开启此对齐，但显式声明确保跨 NDK 版本稳定，并消除 `app-debug.apk is not compatible with 16 KB devices` 打包警告。
+
 ## [0.1.1] — 2026-05-21
 
 ### Fixed

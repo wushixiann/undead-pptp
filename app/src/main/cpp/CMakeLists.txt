@@ -35,4 +35,11 @@ target_link_options(pptp_helper PRIVATE
         -Wl,-z,relro
         -Wl,-z,now
         -Wl,--no-undefined
+        # Android 15+ devices may run with 16 KB memory pages. Force LOAD
+        # segment alignment to 16 KB so the helper .so loads on those devices
+        # (NDK r26c+ does this by default for API 35; we set it explicitly to
+        # remain robust across NDK versions and avoid the "lib not compatible
+        # with 16 KB devices" packaging warning).
+        -Wl,-z,max-page-size=16384
+        -Wl,-z,common-page-size=16384
 )
