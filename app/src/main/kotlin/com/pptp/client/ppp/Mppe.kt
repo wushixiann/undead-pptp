@@ -65,11 +65,11 @@ class Mppe(
     private val recvBaseKey: ByteArray = sha1Only(recvInitialKey, recvInitialKey)
 
     init {
-        Log.i(TAG, "MPPE init: masterKey[0..3]=${prefix(masterKey)} sendInit=${prefix(sendInitialKey)} recvInit=${prefix(recvInitialKey)}")
-        Log.i(TAG, "MPPE base keys (after initial SHA1-only rekey): send=${prefix(sendBaseKey)} recv=${prefix(recvBaseKey)}")
-        val firstSend = nextKey(sendInitialKey, sendBaseKey)
-        val firstRecv = nextKey(recvInitialKey, recvBaseKey)
-        Log.i(TAG, "MPPE first session keys (cc=0): send=${prefix(firstSend)} recv=${prefix(firstRecv)}")
+        // Key fingerprints only at DEBUG to avoid leaking material to default logcat.
+        if (Log.isLoggable(TAG, Log.DEBUG)) {
+            Log.d(TAG, "MPPE init: master=${prefix(masterKey)} sendInit=${prefix(sendInitialKey)} recvInit=${prefix(recvInitialKey)}")
+            Log.d(TAG, "MPPE base: send=${prefix(sendBaseKey)} recv=${prefix(recvBaseKey)}")
+        }
     }
 
     private fun prefix(k: ByteArray): String = k.take(4).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
@@ -108,8 +108,8 @@ class Mppe(
         out[0] = flagsAndCcHi.toByte()
         out[1] = ccLo.toByte()
         System.arraycopy(encrypted, 0, out, 2, encrypted.size)
-        if (cc < 4) {
-            Log.i(TAG, "MPPE encrypt cc=$cc key=${prefix(sendCurrent)} plain[0..3]=${prefix(pppProtoAndPayload)}")
+        if (cc < 4 && Log.isLoggable(TAG, Log.DEBUG)) {
+            Log.d(TAG, "encrypt cc=$cc key=${prefix(sendCurrent)} plain[0..3]=${prefix(pppProtoAndPayload)}")
         }
         return out
     }
@@ -155,16 +155,12 @@ class Mppe(
         val rc4 = Rc4(recvCurrent)
         val payload = packet.copyOfRange(2, packet.size)
         rc4.process(payload)
-        if (cc < 8) {
-            // First few packets: full 8-byte plaintext dump so we can verify
-            // the bytes themselves (not just the protocol parse). For a correct
-            // IPv4 decryption we expect either:
-            //   [0x00 0x21 0x45 .. ..]  — full 2-byte protocol form
-            //   [0x21 0x45 0x00 .. ..]  — PFC-compressed protocol form
-            // Anything else means the key is still wrong OR the data was
-            // compressed (MPPC) before encryption (server agreed to C bit).
+        if (cc < 4 && Log.isLoggable(TAG, Log.DEBUG)) {
+            // First few packets: 8-byte plaintext dump. Expected for IPv4:
+            //   00 21 45 xx ..  (uncompressed protocol)  or
+            //   21 45 xx ..     (PFC-compressed)
             val dump = payload.take(8).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-            Log.i(TAG, "MPPE decrypt cc=$cc key=${prefix(recvCurrent)} → first8=$dump")
+            Log.d(TAG, "decrypt cc=$cc key=${prefix(recvCurrent)} → first8=$dump")
         }
         return payload
     }
@@ -180,9 +176,7 @@ class Mppe(
      */
     private fun advanceRecvKeyTo(targetCc: Int) {
         if (lastRecvCc < 0) {
-            // First packet ever — reset to the "base" (post-initial-rekey) state,
-            // then rotate (targetCc + 1) per-packet SHA1+RC4 cycles so we land on
-            // the key the server used to encrypt this packet.
+            // First packet ever — start from base and rotate (cc+1) times.
             recvCurrent = recvBaseKey.copyOf()
             for (k in 0..targetCc) {
                 recvCurrent = nextKey(recvInitialKey, recvCurrent)
@@ -190,18 +184,24 @@ class Mppe(
             lastRecvCc = targetCc
             return
         }
+        // Server's CC is monotonic mod 4096 in stateless mode. The server never
+        // unilaterally resets its CC — only OUR reset() (triggered by us sending
+        // a CCP Reset-Request) would, and that path doesn't touch recv state.
+        //
+        // So any apparent "backward jump" on the wire is actually:
+        //   (a) the 12-bit counter wrapping (4095 → 0), and/or
+        //   (b) we missed packets and our lastRecvCc lags behind server's true CC
+        //
+        // Either way the correct action is: rotate forward by (delta mod 4096).
+        // Earlier code took a "backward branch" that restarted from base for any
+        // delta > 0x800 — this rebuilt a key that matched neither (a) nor (b),
+        // making every subsequent decrypt garbage until the next coincidence.
+        // The worst case here is ~4095 nextKey() calls in one packet (a few ms);
+        // acceptable, and correct.
         val forwardDelta = (targetCc - lastRecvCc) and 0xFFF
         if (forwardDelta == 0) return // duplicate; key already aligned
-        if (forwardDelta > 0x800) {
-            // Backward jump (server reset / CC wrap). Restart from base.
-            recvCurrent = recvBaseKey.copyOf()
-            for (k in 0..targetCc) {
-                recvCurrent = nextKey(recvInitialKey, recvCurrent)
-            }
-        } else {
-            for (k in 0 until forwardDelta) {
-                recvCurrent = nextKey(recvInitialKey, recvCurrent)
-            }
+        for (k in 0 until forwardDelta) {
+            recvCurrent = nextKey(recvInitialKey, recvCurrent)
         }
         lastRecvCc = targetCc
     }

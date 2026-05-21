@@ -376,6 +376,11 @@ class PptpSession(
         control = null
         session = null
         tunDeliver = null
+        // Cancel any straggler coroutines launched on this session's scope —
+        // notably the per-phase StateFlow observers in PptpVpnService and the
+        // helper-exit fallback launcher. Without this, repeated connect/disconnect
+        // cycles accumulated background jobs over time.
+        scope.cancel()
     }
 
     // ----- PPP I/O -----

@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-21
+
+### Fixed (critical) — MPPE 长会话掉链
+
+实测发现 v0.2.1 浏览刚开始好用，过几分钟就开始大量解密失败。诊断日志显示同一个 Mppe 实例内，cc=0..7 解密**两次**都成功（不同密钥），但两次中间没有 init 日志。其实那是服务器的 CC 在 12 位空间里跑了一圈 wrap 回 0，期间几千个 IPv4 包被我们正确解密静默投递给 TUN（不打日志），所以日志里看不到中间过程。
+
+bug 在 `advanceRecvKeyTo`：原代码在 `forwardDelta > 0x800 (2048)` 时认为"是服务器重置了 CC，restart from base"。但 stateless MPPE 模式下**服务器不会主动重置 CC**（只有我们发 Reset-Request 才会，并且那时也不该重置我们的 recv 状态）。所谓"backward 跳"99% 是 **我们 buffer 溢出丢了一段包**导致 lastRecvCc 落后于服务器真实 CC。重启 base 后用了完全错误的密钥，所有后续包解密失败。
+
+修复：删除 backward branch，**永远 forward rotate by (delta mod 4096)**。最坏情况一次包旋转 ~4000 次 nextKey（几毫秒，可接受），但永远跟服务器对齐。
+
+### Improved
+- **`PptpSession.teardownNetwork` 加 `scope.cancel()`**：原来 disconnect/fail 后 SupervisorJob 不取消，重复连接断开会累积后台协程（状态观察器、helper exit 等）
+- **Mppe 调试日志全部降到 DEBUG**：init/encrypt/decrypt 的 key 指纹只在 `Log.isLoggable(TAG, DEBUG)` 时打印，生产环境不再刷屏
+- UI 里程碑标签更新为 v0.2.2
+
+### Acknowledged Limitations (not fixed yet)
+- 网络底层切换 (WiFi↔蜂窝) 自动重连
+- Kill-switch（VPN 异常时阻止明文出口）
+- 多服务器配置管理
+- 应用分流 (per-app routing)
+- 助手二进制每 5s 周期统计日志略嘈杂（生产可改为按需触发）
+- 调试用 UI 段 ① ② ③（probe / bridge / control 独立测试）后续可隐藏到「开发者模式」开关
+
 ## [0.2.1] — 2026-05-21
 
 ### Fixed — CCP 接受了 MPPC 压缩位（C bit）
