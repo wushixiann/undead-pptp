@@ -12,8 +12,8 @@ android {
         applicationId = "com.pptp.client"
         minSdk = 28
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.1.3"
+        versionCode = 14
+        versionName = "0.1.4"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

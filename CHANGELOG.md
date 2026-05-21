@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-05-21
+
+### Fixed (critical)
+
+**底层接口选错了** —— v0.1.3 用户日志显示 "底层接口: rmnet1" 但用户在 WiFi 上。原因是 `NetworkUtil.activeUnderlayInterface` 迭代 `cm.allNetworks` 时顺序不定，碰巧先看到蜂窝就拿了。helper `SO_BINDTODEVICE` 把 raw socket 绑死在 rmnet1，于是 GRE 真的就走蜂窝了（这才被运营商/CGNAT 吃掉），与 Windows 走默认路由（自然走 WiFi）行为不一致。
+
+修复策略：
+1. **首选 `cm.activeNetwork`** —— Android 系统已经按用户/连通性选好的默认网络。WiFi 已验证可用时，默认就是 WiFi
+2. **回退：按优先级 WiFi → Ethernet → Cellular 遍历**
+3. **跳过 VPN 网络**（避免在已有其他 VPN 的设备上递归套娃）
+
+### Added (Diagnostics)
+- `NetworkUtil.listCandidates(context)`：列出所有非 VPN 网络的接口名、传输类型、是否 validated
+- PptpSession 启动时 `Log.i` 把"选了哪个接口 + 所有候选"打进 logcat，便于排查 Android 没看到 WiFi 的情况
+
 ## [0.1.3] — 2026-05-21
 
 ### Added (Diagnostics)

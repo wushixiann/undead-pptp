@@ -191,6 +191,12 @@ class PptpSession(
         _phase.value = Phase.BridgeStarting
         val iface = NetworkUtil.activeUnderlayInterface(context) ?: "wlan0"
         chosenIface = iface
+        // Log all visible interfaces so the user can sanity-check what Android
+        // actually sees vs what we picked. Most actionable signal when GRE
+        // replies don't come back.
+        val cands = runCatching { NetworkUtil.listCandidates(context) }.getOrDefault(emptyList())
+        Log.i(TAG, "chose iface=$iface; all candidates: " +
+            cands.joinToString(", ") { "${it.ifaceName}(${it.transport}${if (it.validated) "" else ",unvalidated"})" })
         val br = when (val r = HelperLifecycle.startBridge(
             context, iface,
             onHelperExit = { code, out ->
