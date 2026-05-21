@@ -131,8 +131,12 @@ class UdsBridge {
 
     fun send(frame: UdsFrame) {
         require(_state.value == State.Connected) { "bridge not connected" }
-        outbound.trySend(frame).onFailure {
-            throw IllegalStateException("outbound channel full or closed", it)
+        val result = outbound.trySend(frame)
+        if (result.isFailure) {
+            throw IllegalStateException(
+                "outbound channel full or closed",
+                result.exceptionOrNull(),
+            )
         }
     }
 

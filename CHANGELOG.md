@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-21
+
+### Fixed
+- **编译错误** (`helper/UdsBridge.kt` line 134)：`ChannelResult.onFailure` 在我们项目传递依赖到的 kotlinx-coroutines 版本里没有这个 API（它在较新 1.7+ 才补全 ChannelResult 的 onSuccess/onFailure/onClosed；项目未显式声明 coroutines 依赖，靠 androidx-lifecycle/activity-compose 传递的版本不够新）。改成 `isFailure` + `exceptionOrNull()` 显式判断，兼容所有版本。
+
 ## [0.1.0] — 2026-05-20
 
 **首个完整发布。** 协议栈 v0.0.1–v0.0.9 已具备完整功能；本版本只增设置持久化与文档打磨，没有协议层改动。
