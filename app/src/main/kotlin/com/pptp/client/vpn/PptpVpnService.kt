@@ -131,8 +131,19 @@ class PptpVpnService : VpnService() {
             .addAddress(ipStr(local.localIpv4), 32)
             .addRoute("0.0.0.0", 0)
             .setBlocking(true)
-        if (local.primaryDns != 0) builder.addDnsServer(ipStr(local.primaryDns))
-        if (local.secondaryDns != 0) builder.addDnsServer(ipStr(local.secondaryDns))
+            .setMetered(false) // mark unmetered so apps that avoid mobile data still use VPN
+        if (local.primaryDns != 0) {
+            val dns = ipStr(local.primaryDns)
+            builder.addDnsServer(dns)
+            // Belt-and-suspenders: also add explicit route so OS doesn't try to reach
+            // it through the underlying network if some app caches the route.
+            runCatching { builder.addRoute(dns, 32) }
+        }
+        if (local.secondaryDns != 0) {
+            val dns = ipStr(local.secondaryDns)
+            builder.addDnsServer(dns)
+            runCatching { builder.addRoute(dns, 32) }
+        }
         // Don't loop our own app's traffic through the VPN — control channel keep-alives,
         // libsu shell, helper UDS, etc. all need direct access to the underlay.
         runCatching { builder.addDisallowedApplication(packageName) }

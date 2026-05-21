@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-05-21
+
+**MPPE 加解密 v0.1.7 已实证通过**，IP 流量打通。本版本主要是 DNS 路由细节打磨：
+
+### Improved
+- `VpnService.Builder.setMetered(false)`：把 VPN 标成非计量网络。某些应用 (微信、Chrome 等) 在"避免移动数据"时会因 metered 而拒绝走 VPN，这一行让它们正常走
+- 把协商出的 DNS 服务器**显式 addRoute(dns, /32)**：理论上 0.0.0.0/0 catch-all 已经覆盖，但实测某些 Android 路由缓存的边角情况下，显式 /32 路由更稳
+
+### Notes — IP 通了但域名不通的常见原因
+
+不是客户端 bug，是 **PPTP 服务器侧缺 NAT/转发规则**。SSH 上服务器跑：
+
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -s 192.168.1.0/24 -o eth0 -j MASQUERADE
+sudo iptables -A FORWARD -s 192.168.1.0/24 -j ACCEPT
+sudo iptables -A FORWARD -d 192.168.1.0/24 -j ACCEPT
+```
+
+接口名 (eth0) 按 `ip route get 8.8.8.8` 实际改；客户端 IP 段按 IPCP 给的实际改。
+
+若服务器配齐了仍不通，看手机：设置 → 网络与互联网 → **私人 DNS = 关闭**。Android 9+ 的 Private DNS 走 DoT 直连，会绕过 VPN 提供的 DNS。
+
 ## [0.1.7] — 2026-05-21
 
 ### Fixed — MPPE 漏了 pppd 的 "initial rekey" 步骤
