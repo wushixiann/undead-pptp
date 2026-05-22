@@ -86,16 +86,13 @@ class Mppe(
 
     @Synchronized
     fun encrypt(pppProtoAndPayload: ByteArray): ByteArray {
-        // RFC 3078 §6.3 + pppd / Windows RRAS interop quirk:
-        // even in stateless mode, an *additional* rekey is performed every
-        // 256 packets ("to maintain backwards compatibility"). This is on
-        // top of the per-packet rekey below. Missing this extra step caused
-        // both sides to diverge by one SHA1+RC4 rotation starting at packet
-        // 256, with all subsequent decrypts producing garbage.
-        if (sendCC != 0 && sendCC and 0xFF == 0) {
-            sendCurrent = nextKey(sendInitialKey, sendCurrent)
-        }
         // Rotate the send key BEFORE this packet's CC.
+        // (v0.2.3 added an extra rekey at every 256th packet under the theory
+        // that pppd does it — but that's only the stateful-mode path. In
+        // stateless mode pppd rotates exactly once per packet, period. The
+        // extra rekey we added made our send key diverge from the server's
+        // receive key starting at packet 256, server saw garbage inner
+        // protocol after MPPE decrypt and burst-Protocol-Rejected us.)
         sendCurrent = nextKey(sendInitialKey, sendCurrent)
         val rc4 = Rc4(sendCurrent)
         val encrypted = pppProtoAndPayload.copyOf()
@@ -185,32 +182,25 @@ class Mppe(
      */
     private fun advanceRecvKeyTo(targetCc: Int) {
         if (lastRecvCc < 0) {
-            // First packet ever — rotate from base step-by-step to targetCc so
-            // we apply the 256-boundary extra rekey at the right places.
+            // First packet ever — rotate from base (targetCc + 1) times.
             recvCurrent = recvBaseKey.copyOf()
-            var cc = 0
-            while (true) {
-                if (cc != 0 && cc and 0xFF == 0) {
-                    recvCurrent = nextKey(recvInitialKey, recvCurrent)
-                }
+            for (k in 0..targetCc) {
                 recvCurrent = nextKey(recvInitialKey, recvCurrent)
-                if (cc == targetCc) break
-                cc++
             }
             lastRecvCc = targetCc
             return
         }
-        // See encrypt() for the 256-boundary discussion. We must apply the
-        // extra rekey at every step where cc crosses a 0x100 boundary while
-        // advancing from lastRecvCc to targetCc.
+        // Always forward — server's CC is monotonic mod 4096 in stateless mode.
+        // Apparent "backward" is just (a) the 12-bit counter wrapping or (b)
+        // we missed packets and need to catch up to server's true rotation count.
         val forwardDelta = (targetCc - lastRecvCc) and 0xFFF
         if (forwardDelta == 0) return
-        var cc = lastRecvCc
-        repeat(forwardDelta) {
-            cc = (cc + 1) and 0xFFF
-            if (cc != 0 && cc and 0xFF == 0) {
-                recvCurrent = nextKey(recvInitialKey, recvCurrent)
-            }
+        if (forwardDelta > 1024) {
+            // Big jump — likely from kernel raw-socket buffer drops. Log so we
+            // notice if this becomes frequent (might still recover if drops < 4096).
+            Log.w(TAG, "MPPE recv: large forward delta=$forwardDelta (lastCc=$lastRecvCc → targetCc=$targetCc) — likely dropped packets")
+        }
+        for (k in 0 until forwardDelta) {
             recvCurrent = nextKey(recvInitialKey, recvCurrent)
         }
         lastRecvCc = targetCc

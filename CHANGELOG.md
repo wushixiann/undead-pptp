@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-05-22
+
+### Reverted — v0.2.3 的 256-boundary rekey 是错的方向
+
+v0.2.3 装上后 6 秒钟服务器就发了 15 个 LCP Protocol-Reject (code=8) 然后断了。Protocol-Reject 意味着：**server 解了我们的 MPPE 包之后看到的 inner protocol 它不认识**。
+
+复盘：v0.2.3 我加的"每 256 包额外旋转一次"理论是错的。RFC 3078 §6.3 写得歧义，但 pppd 在 stateless 模式实际**不做**这一步。我加上去之后包 0..255 双方对齐，到了包 256 我多旋了一次，从此发送密钥跟 server 的接收密钥差一个 SHA1+RC4 旋转 → server 解出垃圾 inner protocol → Protocol-Reject 风暴。
+
+撤销 encrypt 和 advanceRecvKeyTo 的 256-boundary 额外 rekey。回到 v0.2.2 的"每包一次"策略。
+
+### Kept from v0.2.3
+- UDS Channel buffer 64 → 1024：覆盖 burst 不丢包
+- `trySend → send (suspending)`：consumer 慢时 backpressure 传到 kernel 而不是我们静默丢
+
+### Added — 诊断
+- `advanceRecvKeyTo` 在 `forwardDelta > 1024` 时打 warning。如果以后又出问题，能看到是不是大量丢包（drops > 4096 是潜在的不可恢复状态）
+
+### 实话
+v0.2.2 那次"用 10 秒就坏"我归因于 buffer overflow 应该是对的。256-boundary rekey 完全是我加戏。这次实测确认了。
+
 ## [0.2.3] — 2026-05-22
 
 ### Fixed — 后台 ~10 秒后解密全乱码
