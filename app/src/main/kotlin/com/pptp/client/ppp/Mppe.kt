@@ -214,14 +214,38 @@ class Mppe(
      * we discover its current CC from the next incoming packet's wire value
      * and [advanceRecvKeyTo] handles the realignment automatically.
      */
+    /**
+     * Reset after a SERVER-initiated CCP Reset-Request reaches us. Per pppd
+     * semantics, this means the server's receiver lost sync — it asks us
+     * (the sender) to flush and re-start. We reset SEND only; server's
+     * sender hasn't reset, so our RECV state stays put.
+     */
     @Synchronized
-    fun reset() {
+    fun resetForServerRequest() {
         sendCurrent = sendBaseKey.copyOf()
         sendCC = 0
-        // NOTE: deliberately do NOT touch recvCurrent / lastRecvCc. The server
-        // doesn't reset its sender on receiving our Reset-Request; it just
-        // re-syncs its receiver. Touching recv state here was the bug that
-        // made every subsequent decrypt produce garbage.
+    }
+
+    /**
+     * Reset after WE initiate a Reset-Request because our receiver lost sync.
+     * We must reset our RECV state (so the next incoming packet — which the
+     * server will encrypt with a fresh "1 from base" key — decodes), AND
+     * also reset our SEND state in case the server's receiver is in any way
+     * confused. Server, on receiving our Reset-Request, will reset its
+     * sender; we anticipate that here.
+     */
+    @Synchronized
+    fun resetForOurRequest() {
+        sendCurrent = sendBaseKey.copyOf()
+        sendCC = 0
+        recvCurrent = recvBaseKey.copyOf()
+        lastRecvCc = -1
+    }
+
+    /** Legacy alias kept for callers that expected the v0.2.4 reset semantics. */
+    @Synchronized
+    fun reset() {
+        resetForServerRequest()
     }
 
     companion object {

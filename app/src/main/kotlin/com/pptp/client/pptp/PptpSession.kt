@@ -307,11 +307,14 @@ class PptpSession(
                 }
             },
             onResetRequest = { _ ->
-                // Server tells us their decryption desynced. Reset our state.
-                mppe?.reset()
+                // Server tells us its decryption desynced. Reset our SEND state
+                // (we are the sender that needs to flush). RECV state stays.
+                mppe?.resetForServerRequest()
             },
             onResetAck = { _ ->
-                // We previously sent a Reset-Request; nothing more to do (state already reset).
+                // Confirms our prior Reset-Request was processed by the server.
+                // resetForOurRequest() already cleared both directions on our side.
+                Log.i(TAG, "CCP Reset-Ack received; re-sync complete")
             },
         )
         ccp = sm
@@ -429,22 +432,31 @@ class PptpSession(
         }
     }
 
+    /** Threshold of consecutive un-recognized decrypts before triggering CCP Reset-Request. */
+    private val mppeDesyncThreshold = 64
+    @Volatile private var mppeConsecutiveBad: Int = 0
+
+    /** Whitelist of PPP protocols we expect to see inside MPPE in a healthy stream. */
+    private fun isKnownInnerProtocol(p: Int): Boolean = when (p) {
+        PppProtocol.IPV4,           // 0x0021 (and 0x21 PFC, same Int value)
+        0x0057,                     // IPv6 (we ignore but it's a valid protocol)
+        PppProtocol.LCP,            // 0xC021 — rare inside MPPE but valid
+        PppProtocol.IPCP,           // 0x8021 — ditto
+        PppProtocol.CCP -> true     // 0x80FD
+        else -> false
+    }
+
     private fun handleMppeRx(payload: ByteArray) {
         val m = mppe ?: return
         val plain = m.decrypt(payload)
         if (plain == null) {
-            // Coherency gap or decryption failure → ask peer to flush.
+            // Coherency gap or malformed wire packet → ask peer to flush.
             ccp?.sendResetRequest()
             return
         }
         if (plain.isEmpty()) return
 
-        // The inner PPP frame may carry a PFC-compressed protocol field (1 byte
-        // instead of 2) when LCP negotiated Protocol-Field-Compression. RFC 1661
-        // §6.5: if the low bit of byte 0 is 1, the protocol is one byte.
-        // ICMP echo replies happened to survive previous byte-misalignment with
-        // some luck, but TCP packets do not — the inner IPv4 header gets shifted
-        // by one byte, the kernel sees corrupted L4 headers, and silently drops.
+        // PFC: single-byte inner protocol if low bit of byte 0 is 1.
         val innerProto: Int
         val innerPayload: ByteArray
         if (plain[0].toInt() and 0x01 == 0x01) {
@@ -455,8 +467,22 @@ class PptpSession(
             innerProto = ((plain[0].toInt() and 0xFF) shl 8) or (plain[1].toInt() and 0xFF)
             innerPayload = plain.copyOfRange(2, plain.size)
         }
+
+        if (isKnownInnerProtocol(innerProto)) {
+            mppeConsecutiveBad = 0
+        } else {
+            mppeConsecutiveBad++
+            if (mppeConsecutiveBad >= mppeDesyncThreshold) {
+                Log.w(TAG, "MPPE recv desync detected ($mppeConsecutiveBad consecutive garbage decrypts) — triggering full re-sync")
+                m.resetForOurRequest()
+                ccp?.sendResetRequest()
+                mppeConsecutiveBad = 0
+                return
+            }
+        }
+
         when (innerProto) {
-            PppProtocol.IPV4 -> tunDeliver?.invoke(innerPayload) // 0x0021 == 0x21 in Int
+            PppProtocol.IPV4 -> tunDeliver?.invoke(innerPayload)
             else -> Log.d(TAG, "MPPE inner protocol ${"0x%04x".format(innerProto)} ignored (${innerPayload.size}B)")
         }
     }

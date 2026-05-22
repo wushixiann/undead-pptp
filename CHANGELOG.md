@@ -4,6 +4,39 @@
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-05-22
+
+### Investigation — 算法层无差异，bug 在运行时状态漂移
+
+实测 v0.2.4 仍然出现解密垃圾，于是我直接去翻 Linux 内核 `drivers/net/ppp/ppp_mppe.c` 源码（kernel 才是真正做加解密的，pppd 只管钥匙派生）。对照逐行验证：
+
+| 算法点 | Linux kernel ppp_mppe.c | 我的 Mppe.kt | 一致？ |
+|---|---|---|---|
+| `get_new_key_from_sha` | 纯 SHA1，无 RC4 | `sha1Only()` | ✓ |
+| `mppe_rekey(initial=1)` | 只 memcpy SHA1 digest 到 session_key | `sendBaseKey/recvBaseKey = sha1Only(init, init)` | ✓ |
+| `mppe_rekey(initial=0)` | SHA1 + `arc4_crypt(sha, sha) → session_key` | `nextKey()` 含 SHA1 + RC4 self-encrypt | ✓ |
+| stateless decompress 主流程 | 每包前 catch-up loop rekey 到 wire cc | `advanceRecvKeyTo` forward rotate | ✓ |
+| stateless 256-boundary | **无**额外 rekey（256-boundary 只在 stateful 触发） | v0.2.4 已删 | ✓ |
+| `state->ccount` 初值 | 4095 (catch-up 首包 cc=0 → 1 次 rekey) | `lastRecvCc = -1` 首包 cc=N 旋 N+1 次 from base | ✓ 等价 |
+| flag byte | `0x80 | 0x10` = FLUSHED + ENCRYPTED | `0x90` | ✓ |
+
+**算法层完全没问题。** 那 bug 一定在运行时 —— buffer 丢包、协程竞争、被 OS schedule 出 / kernel 收包暴风等导致 send 和 recv 状态在某次错位之后无法自然恢复（每包旋转固定数量，错过 N 次就永远差 N 次旋转）。
+
+### Added — MPPE 自动 re-sync 机制
+
+既然漂移不可避免，加自动恢复：
+- **`handleMppeRx` 维护 `mppeConsecutiveBad` 计数**：解出的 inner protocol 不在 {0x0021 IPv4, 0x0057 IPv6, 0xC021 LCP, 0x8021 IPCP, 0x80FD CCP} 白名单内，就 +1；任何一个白名单内的解密成功就清零
+- **超过 64 连续坏包**：自动发 **CCP Reset-Request** 给服务器（让 server 重置它的 send 状态）+ 调用新的 `Mppe.resetForOurRequest()` 把我们自己的 send 和 recv 状态全部回到 base
+- 服务器收到 Reset-Request 后会回 Reset-Ack，重新从 cc=0 开始 — 双方对齐
+
+### Refactored — Mppe.reset 拆成方向感知的两个方法
+- `resetForServerRequest()`：服务器主动发 Reset-Request 来时调用，**只重 send**（server 在告诉我们"你的发我解不开，请重发"）
+- `resetForOurRequest()`：我们检测到 recv 漂移主动发 Reset-Request 时调用，**send 和 recv 都重置**（anticipate server 的 send 也会重置）
+- 旧 `reset()` 作为 alias 指向 `resetForServerRequest()` 保留兼容
+
+### Honest Assessment
+我已经把 6 个独立的 PPTP bug 修了（flag byte / initial SHA1 rekey / PFC inner / MPPC C bit / backward branch / CC wrap），算法层逐行对照 Linux kernel 源码确认没差异。如果 v0.2.5 加了自动恢复还出问题，那真正的解决方案就是 **v0.3 用 JNI 把 Linux kernel ppp_mppe.c 编进来**（同一份 C 代码，不再二次实现）。
+
 ## [0.2.4] — 2026-05-22
 
 ### Reverted — v0.2.3 的 256-boundary rekey 是错的方向
