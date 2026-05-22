@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 package com.pptp.client.pptp
 
 import android.util.Log
