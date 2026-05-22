@@ -86,6 +86,15 @@ class Mppe(
 
     @Synchronized
     fun encrypt(pppProtoAndPayload: ByteArray): ByteArray {
+        // RFC 3078 §6.3 + pppd / Windows RRAS interop quirk:
+        // even in stateless mode, an *additional* rekey is performed every
+        // 256 packets ("to maintain backwards compatibility"). This is on
+        // top of the per-packet rekey below. Missing this extra step caused
+        // both sides to diverge by one SHA1+RC4 rotation starting at packet
+        // 256, with all subsequent decrypts producing garbage.
+        if (sendCC != 0 && sendCC and 0xFF == 0) {
+            sendCurrent = nextKey(sendInitialKey, sendCurrent)
+        }
         // Rotate the send key BEFORE this packet's CC.
         sendCurrent = nextKey(sendInitialKey, sendCurrent)
         val rc4 = Rc4(sendCurrent)
@@ -176,31 +185,32 @@ class Mppe(
      */
     private fun advanceRecvKeyTo(targetCc: Int) {
         if (lastRecvCc < 0) {
-            // First packet ever — start from base and rotate (cc+1) times.
+            // First packet ever — rotate from base step-by-step to targetCc so
+            // we apply the 256-boundary extra rekey at the right places.
             recvCurrent = recvBaseKey.copyOf()
-            for (k in 0..targetCc) {
+            var cc = 0
+            while (true) {
+                if (cc != 0 && cc and 0xFF == 0) {
+                    recvCurrent = nextKey(recvInitialKey, recvCurrent)
+                }
                 recvCurrent = nextKey(recvInitialKey, recvCurrent)
+                if (cc == targetCc) break
+                cc++
             }
             lastRecvCc = targetCc
             return
         }
-        // Server's CC is monotonic mod 4096 in stateless mode. The server never
-        // unilaterally resets its CC — only OUR reset() (triggered by us sending
-        // a CCP Reset-Request) would, and that path doesn't touch recv state.
-        //
-        // So any apparent "backward jump" on the wire is actually:
-        //   (a) the 12-bit counter wrapping (4095 → 0), and/or
-        //   (b) we missed packets and our lastRecvCc lags behind server's true CC
-        //
-        // Either way the correct action is: rotate forward by (delta mod 4096).
-        // Earlier code took a "backward branch" that restarted from base for any
-        // delta > 0x800 — this rebuilt a key that matched neither (a) nor (b),
-        // making every subsequent decrypt garbage until the next coincidence.
-        // The worst case here is ~4095 nextKey() calls in one packet (a few ms);
-        // acceptable, and correct.
+        // See encrypt() for the 256-boundary discussion. We must apply the
+        // extra rekey at every step where cc crosses a 0x100 boundary while
+        // advancing from lastRecvCc to targetCc.
         val forwardDelta = (targetCc - lastRecvCc) and 0xFFF
-        if (forwardDelta == 0) return // duplicate; key already aligned
-        for (k in 0 until forwardDelta) {
+        if (forwardDelta == 0) return
+        var cc = lastRecvCc
+        repeat(forwardDelta) {
+            cc = (cc + 1) and 0xFFF
+            if (cc != 0 && cc and 0xFF == 0) {
+                recvCurrent = nextKey(recvInitialKey, recvCurrent)
+            }
             recvCurrent = nextKey(recvInitialKey, recvCurrent)
         }
         lastRecvCc = targetCc

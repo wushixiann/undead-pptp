@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-05-22
+
+### Fixed — 后台 ~10 秒后解密全乱码
+
+实测 v0.2.2 装上能用，UI 进入后台 ~5 秒后所有 MPPE 解密变垃圾。诊断出两个独立的 bug 都在起作用：
+
+**Bug A — UDS Channel 容量 64 + trySend 静默丢包**：
+`UdsBridge.received` 的 `Channel(capacity = 64)` 太小，应用进后台 CPU 被 throttle 时 consumer 慢，channel 满了 `trySend` 静默丢包。每丢一个 MPPE 状态就跟服务器差一次旋转，累积丢 > 4096 包后 12-bit CC 取模 wrap，密钥永远对不上。
+
+修复：`capacity = 1024`（覆盖一整个 CC wrap 窗口）+ `trySend → send` （suspending，channel 满了 IO 循环阻塞读 UDS，让 backpressure 传到 kernel raw socket，丢包发生在 kernel 而不是我们）。
+
+**Bug B — 漏了 MPPE 256-boundary 的额外 rekey（pppd 兼容性）**：
+RFC 3078 §6.3 写："To maintain backwards compatibility, the encryption tables are changed every 256 packets. In stateless mode, this happens once for every packet sent." 我读成"stateless = 每包一次，OK"。但 pppd / Windows RRAS 的实际实现是 **"每包一次 + 每 256 包额外一次"**。
+
+10 秒 × ~25 包/秒 ≈ 250 包，跟"用了 10 秒就崩"完美吻合：包 0..255 用 N+1 次旋转密钥，包 256 服务器多旋一次 (257 次) 我们没旋，从此差一个旋转 → 所有后续包解密垃圾。
+
+修复：`encrypt` 和 `advanceRecvKeyTo` 都加上 256-boundary 检查 (`cc != 0 && cc and 0xFF == 0`)，遇到 256/512/768... 时多做一次 `nextKey`。advanceRecvKeyTo 改成 step-by-step 推进而不是直接 forward by delta，确保在 256 边界一定额外 rekey。
+
+### Notes
+两个 bug 都修了，浏览应该能稳定。如果还崩，请贴新日志，重点看 `MPPE inner protocol 0xXXXX ignored` 是否还出现以及在哪些包数附近。
+
 ## [0.2.2] — 2026-05-21
 
 ### Fixed (critical) — MPPE 长会话掉链

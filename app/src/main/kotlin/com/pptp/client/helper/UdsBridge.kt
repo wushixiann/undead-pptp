@@ -53,8 +53,13 @@ class UdsBridge {
     private val _rxCount = MutableStateFlow(0)
     val rxCount: StateFlow<Int> = _rxCount.asStateFlow()
 
-    /** Frames received from the helper (raw socket → UDS direction). */
-    val received: Channel<UdsFrame> = Channel(capacity = 64)
+    /**
+     * Frames received from the helper (raw socket → UDS direction).
+     *
+     * Capacity 1024: covers ~bursts up to a full CC wrap window without drops.
+     * Each frame is at most a few KB so worst-case memory ≈ few MB.
+     */
+    val received: Channel<UdsFrame> = Channel(capacity = 1024)
 
     private var server: LocalServerSocket? = null
     private var client: LocalSocket? = null
@@ -126,8 +131,13 @@ class UdsBridge {
                     break
                 }
                 _rxCount.value = _rxCount.value + 1
-                // trySend so we don't block the IO thread if app consumer is slow.
-                received.trySend(frame)
+                // SUSPENDING send (not trySend): when the app consumer is slow
+                // (background CPU throttling, slow TUN write, etc.) we want
+                // backpressure that pauses our UDS read instead of silently
+                // dropping. Dropped frames desynchronize the MPPE coherency
+                // count — accumulate >4096 drops and key derivation goes wrong
+                // forever (12-bit CC wraps mod 4096).
+                received.send(frame)
             }
         } finally {
             txJob.cancel()
