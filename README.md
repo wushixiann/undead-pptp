@@ -3,7 +3,7 @@
 为已 root 的 Android 设备实现的 PPTP VPN 客户端。
 Android 12 (API 31) 起系统已移除 PPTP 支持，本项目在用户态恢复该能力。
 
-**当前版本：v0.2.6（修复 stateless MPPE late-packet 处理，解决长跑解密漂移）**
+**当前版本：v0.2.7（首页瘦身，删除调试入口与孤儿代码）**
 
 ✅ 实测打通：Android 14 (Pixel) + Magisk root + pptpd 服务器，能 ping baidu.com、走完整 IPv4 流量、MPPE-128 stateless 加密。
 
@@ -146,7 +146,8 @@ sudo tcpdump -i any -nn -w pptp.pcap '(tcp port 1723) or (proto gre)'
 | **v0.1.7** | **MPPE 加 base key 阶段，与 pppd 算法对齐** | ✅ 实证打通 |
 | v0.1.8 | VpnService setMetered(false) + 显式 /32 DNS 路由 | ✅ |
 | v0.1.9–v0.2.5 | MPPE 算法迭代修正（PFC 内层 / MPPC C bit / 256-boundary 回滚 / 自动恢复尝试） | ✅ |
-| **v0.2.6** | **stateless MPPE late-packet 丢弃 + flushed bit 强制 + 移除 CCP 自动 reset** | ✅ 当前版本 |
+| v0.2.6 | stateless MPPE late-packet 丢弃 + flushed bit 强制 + 移除 CCP 自动 reset | ✅ |
+| **v0.2.7** | **首页瘦身：删除调试 Section + 孤儿代码清理 + 文档更新** | ✅ 当前版本 |
 | 未来 | 网络切换自动重连、kill-switch、多服务器配置 | — |
 
 ## 协议参考

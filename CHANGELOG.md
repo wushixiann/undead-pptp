@@ -4,6 +4,43 @@
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-05-22
+
+### Removed — 首页调试入口
+
+v0.0.x 时代留下的三个手动调试 Section 现在已经没人用，全部下掉：
+- ① "root + raw GRE socket 自检"（ProbeSection）
+- ② "Helper bridge UDS 桥接"（BridgeSection，手动启停 + 发测试 GRE 包）
+- ③ "PPTP 控制通道"（ControlSection，手动 SCCRQ/OCRQ/Echo/Disconnect）
+
+这些是 v0.0.1→v0.0.4 一步步建协议栈时的"接线验证 UI"。现在完整 VPN 已经在 ④ Session Section 自动跑完整个流水线，前三个 Section 既不验证也不调试任何东西，只是让首页变得吓人。
+
+### Cleaned — 因 UI 移除变孤儿的代码
+
+按"删除因你的改动而变得无用的导入/变量/函数"原则一并清掉：
+- `HelperLifecycle.probe()` 函数 + `ProbeResult` 密封类
+- `ControlChannel.asyncEvents` Channel + 两处 `trySend` + `close()`
+- `ControlChannel.negotiatedPeerInfo` Volatile 字段 + 唯一赋值
+- `ControlChannel.echoSuccesses` / `echoFailures` StateFlow + ping() 中的计数逻辑
+- `MainActivity.buildTestGreFrame()`
+- `strings.xml` 里 7 条无人引用的 `<string>`（helper_check_*、milestone_*）
+
+### Updated — 过时文档
+
+- `PptpVpnService` 顶部 KDoc 写的还是 v0.0.7 限制（"No MPPE / No CCP"），改为反映 v0.2.6 实际状态
+- README 的"当前版本"指到 v0.2.7
+
+### Honest Assessment — 本次审查发现但**未动**的潜在改进
+
+按"如果注意到无关的死代码，提一下 — 不要删除它"原则，记录在此供后续决策：
+
+1. **LCP 接受 PAP 而不强制 MS-CHAP-V2**：`LcpStateMachine.handlePeerConfigureRequest` 中 PAP 直接进 ackList。中间人攻击可改写 server 的 LCP ConfReq 把认证降级到 PAP，明文密码泄露。建议改为只 ACK MS-CHAP-V2，对 PAP 发 NAK 反建议 MS-CHAP-V2。
+2. **`ControlChannel.CallDisconnectNotify` 处理**：服务器主动断开时我们能感知到，但 `PptpVpnService` 没有 collect `_lastError` 之外的更细粒度信号，UI 可能停留在 "Connected" 几秒才被超时机制兜底。
+3. **`UdsBridge.send` 用 `trySend`**：tx 方向仍可能丢包（虽然 rx 方向 v0.2.3 已改成 `send` 阻塞）。tx 丢包会让 server 端 MPPE recv CC 错位 → 同 v0.2.6 修复的对称问题。
+4. **`UdsBridge.outbound` 容量只有 64**：对比 `received` 的 1024 显得偏小。大流量上传场景下可能溢出。
+
+这些不在本次 task scope，留作后续。
+
 ## [0.2.6] — 2026-05-22
 
 ### Fixed — 真正的 root cause: late-packet detection 缺失

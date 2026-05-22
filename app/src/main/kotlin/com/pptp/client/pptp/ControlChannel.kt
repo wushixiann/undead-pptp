@@ -7,7 +7,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -53,13 +52,7 @@ class ControlChannel(
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
-    /** Server-sent async events the caller may want to observe in the UI. */
-    val asyncEvents: Channel<ControlMessage> = Channel(capacity = 32)
-
     @Volatile var session: SessionState? = null
-        private set
-
-    @Volatile var negotiatedPeerInfo: ControlMessage.StartControlConnectionReply? = null
         private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -77,10 +70,6 @@ class ControlChannel(
     private var sccrpPromise: CompletableDeferred<ControlMessage.StartControlConnectionReply>? = null
     private var ocrpPromise: CompletableDeferred<ControlMessage.OutgoingCallReply>? = null
     private var stopReplyPromise: CompletableDeferred<ControlMessage.StopControlConnectionReply>? = null
-
-    /** Counter of consecutive echo failures, surfaced to UI. */
-    val echoFailures = MutableStateFlow(0)
-    val echoSuccesses = MutableStateFlow(0)
 
     /**
      * Connect TCP, send SCCRQ, wait for SCCRP. Returns the SCCRP on success;
@@ -128,7 +117,6 @@ class ControlChannel(
             teardown("服务器拒绝 SCCRQ：result=${reply.resultCode} error=${reply.errorCode}")
             throw IOException("SCCRP non-OK: result=${reply.resultCode}")
         }
-        negotiatedPeerInfo = reply
         _state.value = State.Established
         return reply
     }
@@ -193,12 +181,6 @@ class ControlChannel(
         send(ControlMessage.EchoRequest(id))
         val reply = withTimeoutOrNull(rpcTimeoutMs) { promise.await() }
         synchronized(pendingEchoes) { pendingEchoes.remove(id) }
-        if (reply != null) {
-            echoSuccesses.value = echoSuccesses.value + 1
-            echoFailures.value = 0
-        } else {
-            echoFailures.value = echoFailures.value + 1
-        }
         return reply
     }
 
@@ -279,14 +261,13 @@ class ControlChannel(
             }
             is ControlMessage.CallDisconnectNotify -> {
                 _lastError.value = "服务器断开呼叫：result=${msg.resultCode} cause=${msg.causeCode}"
-                asyncEvents.trySend(msg)
                 if (_state.value == State.CallUp || _state.value == State.WaitOcrp) {
                     scope.launch { teardown("CDN received") }
                 }
             }
-            else -> {
-                asyncEvents.trySend(msg)
-            }
+            // SetLinkInfo / WanErrorNotify / etc. — server-side informational
+            // messages we don't currently act on. Logged at the readLoop level.
+            else -> { /* ignored */ }
         }
     }
 
@@ -319,7 +300,6 @@ class ControlChannel(
             pendingEchoes.values.forEach { it.cancel() }
             pendingEchoes.clear()
         }
-        asyncEvents.close()
         scope.cancel()
     }
 

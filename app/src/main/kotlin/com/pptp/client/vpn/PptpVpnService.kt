@@ -22,20 +22,19 @@ import kotlinx.coroutines.launch
 
 /**
  * VpnService that owns:
- *   - The PptpSession instance (control channel + helper + PPP + auth + IPCP)
+ *   - The PptpSession instance (control channel + helper + PPP + auth + IPCP/CCP)
  *   - The Android TUN file descriptor (only after IPCP opens)
  *   - The TunPipe that translates between TUN IP packets and the PPP/GRE
  *     pipeline.
  *
  * Started from MainActivity via a regular Intent after the user has
- * acknowledged VpnService.prepare(). State is exposed via [State] companion
- * objects so the UI can collect on it without binding the Service.
+ * acknowledged VpnService.prepare(). State is exposed via [State] in the
+ * companion so the UI can collect on it without binding the Service.
  *
- * v0.0.7 limitations:
- *   - No reconnect on underlay change (NetworkCallback comes in v0.1.0)
- *   - No MPPE — works only against servers configured WITHOUT mppe required
- *   - No CCP — server CCP ConfReq is ignored (will trigger TermReq on strict
- *     servers — switch their config to `mppe=no required` for v0.0.7 testing)
+ * Current limitations (kept short — see CHANGELOG for history):
+ *   - No automatic reconnect when the underlay (WiFi ↔ cellular) changes.
+ *   - MPPE-128 stateless only; stateful MPPE and 40/56-bit unsupported.
+ *   - IPv4 only inside the tunnel (server-sent IPCPv6 / IPv6 packets ignored).
  */
 class PptpVpnService : VpnService() {
 
