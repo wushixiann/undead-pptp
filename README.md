@@ -93,6 +93,32 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 第一次需要先 `gradle wrapper` 生成 `gradlew` 脚本（仓库只提交了 `gradle/wrapper/` 配置，没提交 `gradlew` 启动器）。
 
+### Release 签名（可选，仅"正式发布"需要）
+
+仓库默认不带 release keystore — release APK 是发布者的身份证明，**绝不进 git**。如果你只是想本地装 release build 跑跑：
+
+```bash
+./gradlew :app:assembleRelease    # 会用 debug 签名自动 fallback，能装能跑
+```
+
+如果你要做真正的发布（升级现有 app、上 GitHub Release、上 F-Droid 等）需要自己的 keystore：
+
+```bash
+# 1. 生成 keystore（一次性，存好别丢 — 丢了这个 applicationId 就再也升不了级）
+keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 4096 \
+        -validity 36500 -alias pptp-release
+
+# 2. 复制示例配置并填入真实路径和密码
+cp keystore.properties.example keystore.properties
+# 编辑 keystore.properties 填入 storeFile / storePassword / keyAlias / keyPassword
+
+# 3. 构建
+./gradlew :app:assembleRelease
+# 产物：app/build/outputs/apk/release/app-release.apk
+```
+
+`keystore.properties` 和 `*.jks` `*.keystore` 都在 `.gitignore` 里，不会被意外提交。建议把 `release.jks` 放到 repo 之外的私密位置（如 `~/keys/pptp-release.jks`），并备份到加密 U 盘 / 密码管理器附件。**丢失 keystore = 这个 app 永远无法发布升级**（Android 拒绝替换签名）。
+
 ## 使用
 
 > 前置条件：已 root 的 Android 设备（Magisk 21+ 推荐），可访问的 PPTP 服务器。

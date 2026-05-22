@@ -20,3 +20,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Release signing — NEVER commit private keystores or their passwords
+*.jks
+*.keystore
+keystore.properties
