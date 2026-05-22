@@ -150,13 +150,20 @@ class Mppe(
         }
         lastReceivedCC = cc
 
-        // Stateless requires Flushed on every packet; tolerate but warn if missing
-        // (some non-strict implementations vary).
+        // Per RFC 3078 §8.1 (and Linux kernel ppp_mppe.c sanity checks): in stateless
+        // mode the Flushed bit MUST be set on every packet. A packet without it is
+        // malformed and the kernel adds +100 to sanity_errors. We drop it outright.
         if (!flushed) {
-            Log.w(TAG, "MPPE packet without A bit (cc=$cc) — treating as stateless anyway")
+            Log.w(TAG, "MPPE A bit not set in stateless mode (cc=$cc) — dropping")
+            return null
         }
 
-        advanceRecvKeyTo(cc)
+        if (!advanceRecvKeyTo(cc)) {
+            // Late / out-of-order / duplicate packet — drop silently without
+            // perturbing recvCurrent. Subsequent in-window packets must still
+            // decode correctly.
+            return null
+        }
 
         val rc4 = Rc4(recvCurrent)
         val payload = packet.copyOfRange(2, packet.size)
@@ -172,15 +179,35 @@ class Mppe(
     }
 
     /**
-     * Rotate recvCurrent so it equals init rotated (targetCc + 1) times.
+     * Advance recvCurrent so it matches the per-packet key for [targetCc].
      *
-     * Stateless MPPE: server's send key for the packet wire-tagged with cc is
-     * derived by starting from the initial key and applying [nextKey] exactly
-     * cc+1 times. We cache the most recent (cc, key) pair and only rotate
-     * forward; on backward jumps (rare after CC wrap, or server reset) we
-     * restart from the initial key and rotate up.
+     * **Returns false** if the packet should be silently dropped (late or
+     * duplicate). On false, [recvCurrent] and [lastRecvCc] are NOT modified
+     * — subsequent in-window packets must still decode correctly.
+     *
+     * Algorithm mirrors Linux kernel `drivers/net/ppp/ppp_mppe.c`
+     * `mppe_decompress` for the stateless path:
+     *
+     * ```c
+     * if ((ccount - state->ccount) % MPPE_CCOUNT_SPACE > MPPE_CCOUNT_SPACE / 2) {
+     *     state->sanity_errors++;
+     *     goto sanity_error;    // discard late/out-of-order packet
+     * }
+     * while (state->ccount != ccount) {
+     *     mppe_rekey(state, 0);
+     *     state->ccount = (state->ccount + 1) % MPPE_CCOUNT_SPACE;
+     * }
+     * ```
+     *
+     * The key insight (which v0.2.5 and earlier got wrong): a forward delta of
+     * e.g. 4094 in a 12-bit counter is almost certainly NOT "we lost 4094
+     * packets" — it's a single out-of-order packet arriving 2 slots before the
+     * latest one we processed. Catching-up rekey 4094 times in that case would
+     * irrecoverably scramble our key stream. The kernel's modulo-half-space
+     * test discards such packets and the recv stream self-heals on the next
+     * in-order packet.
      */
-    private fun advanceRecvKeyTo(targetCc: Int) {
+    private fun advanceRecvKeyTo(targetCc: Int): Boolean {
         if (lastRecvCc < 0) {
             // First packet ever — rotate from base (targetCc + 1) times.
             recvCurrent = recvBaseKey.copyOf()
@@ -188,37 +215,43 @@ class Mppe(
                 recvCurrent = nextKey(recvInitialKey, recvCurrent)
             }
             lastRecvCc = targetCc
-            return
+            return true
         }
-        // Always forward — server's CC is monotonic mod 4096 in stateless mode.
-        // Apparent "backward" is just (a) the 12-bit counter wrapping or (b)
-        // we missed packets and need to catch up to server's true rotation count.
-        val forwardDelta = (targetCc - lastRecvCc) and 0xFFF
-        if (forwardDelta == 0) return
-        if (forwardDelta > 1024) {
-            // Big jump — likely from kernel raw-socket buffer drops. Log so we
-            // notice if this becomes frequent (might still recover if drops < 4096).
-            Log.w(TAG, "MPPE recv: large forward delta=$forwardDelta (lastCc=$lastRecvCc → targetCc=$targetCc) — likely dropped packets")
+        val delta = (targetCc - lastRecvCc) and 0xFFF
+        if (delta == 0) {
+            // Duplicate of the packet we just processed — drop.
+            return false
         }
-        for (k in 0 until forwardDelta) {
+        if (delta > MPPE_CCOUNT_SPACE / 2) {
+            // Late / out-of-order packet (the kernel's "discard late packet"
+            // path). Do NOT rotate the recv key — leave state untouched.
+            Log.w(TAG, "MPPE late/out-of-order packet cc=$targetCc lastCc=$lastRecvCc delta=$delta — dropping")
+            return false
+        }
+        if (delta > 64) {
+            // Genuine loss of `delta-1` packets. Recoverable as long as
+            // delta < 2048 (MPPE_CCOUNT_SPACE/2). Log so we can see if this
+            // becomes frequent — usually means UDS bridge ring overflow.
+            Log.w(TAG, "MPPE recv: large forward delta=$delta (lastCc=$lastRecvCc → targetCc=$targetCc) — recovering")
+        }
+        for (k in 0 until delta) {
             recvCurrent = nextKey(recvInitialKey, recvCurrent)
         }
         lastRecvCc = targetCc
+        return true
     }
 
-    /**
-     * Reset the send/recv state. Called when a CCP Reset-Request is processed.
-     *
-     * The send side restarts from init at cc=0. The receive side does NOT
-     * unilaterally restart — the server keeps using its own CC counter, so
-     * we discover its current CC from the next incoming packet's wire value
-     * and [advanceRecvKeyTo] handles the realignment automatically.
-     */
     /**
      * Reset after a SERVER-initiated CCP Reset-Request reaches us. Per pppd
      * semantics, this means the server's receiver lost sync — it asks us
      * (the sender) to flush and re-start. We reset SEND only; server's
      * sender hasn't reset, so our RECV state stays put.
+     *
+     * In v0.2.6 we no longer initiate Reset-Requests ourselves — stateless
+     * MPPE self-heals via the late-packet test in [advanceRecvKeyTo], and
+     * pppd's behavior on receiving Reset-Request in stateless mode is
+     * under-specified, so trying to use it as a recovery mechanism caused
+     * more problems than it solved (see CHANGELOG v0.2.5 → v0.2.6).
      */
     @Synchronized
     fun resetForServerRequest() {
@@ -226,31 +259,12 @@ class Mppe(
         sendCC = 0
     }
 
-    /**
-     * Reset after WE initiate a Reset-Request because our receiver lost sync.
-     * We must reset our RECV state (so the next incoming packet — which the
-     * server will encrypt with a fresh "1 from base" key — decodes), AND
-     * also reset our SEND state in case the server's receiver is in any way
-     * confused. Server, on receiving our Reset-Request, will reset its
-     * sender; we anticipate that here.
-     */
-    @Synchronized
-    fun resetForOurRequest() {
-        sendCurrent = sendBaseKey.copyOf()
-        sendCC = 0
-        recvCurrent = recvBaseKey.copyOf()
-        lastRecvCc = -1
-    }
-
-    /** Legacy alias kept for callers that expected the v0.2.4 reset semantics. */
-    @Synchronized
-    fun reset() {
-        resetForServerRequest()
-    }
-
     companion object {
         private const val TAG = "Mppe"
         const val KEY_LEN_BYTES = 16 // 128-bit only for v0.0.8
+
+        /** 12-bit coherency count space (RFC 3078 §2). */
+        private const val MPPE_CCOUNT_SPACE = 0x1000
 
         /**
          * RFC 3079 §3.4 Magic 2: text used for the CLIENT→SERVER direction

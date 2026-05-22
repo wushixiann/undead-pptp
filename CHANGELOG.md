@@ -4,6 +4,56 @@
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-05-22
+
+### Fixed — 真正的 root cause: late-packet detection 缺失
+
+v0.2.5 之前的所有版本 `Mppe.advanceRecvKeyTo` 都犯同一个错: **无条件 forward catch-up**。Linux 内核 `drivers/net/ppp/ppp_mppe.c` 在 stateless 分支里有一个关键守卫:
+
+```c
+/* Discard late packet */
+if ((ccount - state->ccount) % MPPE_CCOUNT_SPACE > MPPE_CCOUNT_SPACE / 2) {
+    state->sanity_errors++;
+    goto sanity_error;
+}
+while (state->ccount != ccount) {
+    mppe_rekey(state, 0);
+    state->ccount = (state->ccount + 1) % MPPE_CCOUNT_SPACE;
+}
+```
+
+12-bit CC 空间里 "差 4094" 几乎肯定是 "迟到了一个相差 2 的乱序包"，而不是 "丢了 4094 个包"。内核在这种情况下**直接丢弃迟到包**，state 不动；下一个顺序包正常解码。
+
+我之前的实现遇到 forwardDelta=4094 会真的旋转 4094 次，**把 recvCurrent 永久打乱**，从此所有解密都是垃圾。日志里 `MPPE recv: large forward delta=4094` 就是症状现场。
+
+**修复**:
+- `advanceRecvKeyTo` 改为返回 `Boolean`；`delta > MPPE_CCOUNT_SPACE/2` 或 `delta == 0` 时丢弃，state 不变
+- `decrypt` 在 `advanceRecvKeyTo` 返回 false 时返回 null
+- 同时把 flushed bit (A=0x80) 检查从 warning 升级为 hard drop —— 内核在 stateless 模式下没设 A bit 就 `sanity_errors += 100`
+
+### Removed — 无意义的 CCP Reset-Request 自动触发
+
+v0.2.5 加的 "64 连续坏包 → 发 Reset-Request" 是基于 **stateful 模式的恢复机制**的误用。Stateless MPPE 根本不需要它:
+
+1. RFC 3078 没有定义 stateless 模式下 Reset-Request 对 sender's key sequence 的语义
+2. pppd 收到 Reset-Request 在 stateless 模式只是 ACK 一下，不会重置 send 状态
+3. 实测日志: 触发自动恢复后 server 发 60+ Reset-Request 风暴 70 秒，证明双方再也对不齐
+
+去掉了 `mppeDesyncThreshold`、`mppeConsecutiveBad`、`isKnownInnerProtocol`、`Mppe.resetForOurRequest`、`Mppe.reset()` legacy alias。`handleMppeRx` 简化为 "decrypt 失败就丢"。
+
+### 设计教训
+
+8 次迭代后才找到真正的 root cause。回顾每一版的"修复":
+- v0.1.5: flag byte ✓ (真 bug)
+- v0.1.7: initial SHA1 rekey ✓ (真 bug)
+- v0.2.0: PFC inner ✓ (真 bug)
+- v0.2.1: MPPC C bit ✓ (真 bug)
+- v0.2.3: 256-boundary rekey ✗ (假修复，v0.2.4 撤回)
+- v0.2.5: CCP Reset-Request 自动恢复 ✗ (假修复，本版撤回)
+- v0.2.6: late-packet 丢弃 ✓ (**真 root cause**)
+
+教训: 我之前对照 Linux kernel 时只看了 "key derivation 那几步算法对不对"，**没看 decompress 主流程的守卫语句**。下次复现这种"对照参考实现"工作，应该把整个函数的控制流逐行过一遍，不只是核心计算步骤。
+
 ## [0.2.5] — 2026-05-22
 
 ### Investigation — 算法层无差异，bug 在运行时状态漂移

@@ -312,9 +312,10 @@ class PptpSession(
                 mppe?.resetForServerRequest()
             },
             onResetAck = { _ ->
-                // Confirms our prior Reset-Request was processed by the server.
-                // resetForOurRequest() already cleared both directions on our side.
-                Log.i(TAG, "CCP Reset-Ack received; re-sync complete")
+                // v0.2.6+ no longer initiates Reset-Request — stateless MPPE
+                // self-heals via the late-packet test. This handler only fires
+                // if the server replies to a stale request from a prior version.
+                Log.d(TAG, "CCP Reset-Ack received (unexpected — we don't initiate Reset)")
             },
         )
         ccp = sm
@@ -432,28 +433,25 @@ class PptpSession(
         }
     }
 
-    /** Threshold of consecutive un-recognized decrypts before triggering CCP Reset-Request. */
-    private val mppeDesyncThreshold = 64
-    @Volatile private var mppeConsecutiveBad: Int = 0
-
-    /** Whitelist of PPP protocols we expect to see inside MPPE in a healthy stream. */
-    private fun isKnownInnerProtocol(p: Int): Boolean = when (p) {
-        PppProtocol.IPV4,           // 0x0021 (and 0x21 PFC, same Int value)
-        0x0057,                     // IPv6 (we ignore but it's a valid protocol)
-        PppProtocol.LCP,            // 0xC021 — rare inside MPPE but valid
-        PppProtocol.IPCP,           // 0x8021 — ditto
-        PppProtocol.CCP -> true     // 0x80FD
-        else -> false
-    }
-
+    /**
+     * Decrypt and dispatch one inbound MPPE-compressed PPP frame.
+     *
+     * In stateless MPPE there is NO protocol-level recovery beyond the
+     * "discard late packet" rule (see [Mppe.advanceRecvKeyTo]). v0.2.5 tried
+     * to auto-send CCP Reset-Request on consecutive garbage decrypts, but:
+     *
+     *  - Stateless mode (H+S) doesn't define Reset-Request semantics for the
+     *    sender's key sequence — pppd / RRAS just ACK and continue.
+     *  - The "garbage" was usually a single out-of-order packet wrongly fed
+     *    into the catch-up rotation loop, scrambling our recv key. With the
+     *    late-packet test now in place, that root cause is gone.
+     *
+     * So we keep this dispatch dead simple: decrypt returned null → drop;
+     * non-IPv4 inner → log and drop; IPv4 → deliver to TUN.
+     */
     private fun handleMppeRx(payload: ByteArray) {
         val m = mppe ?: return
-        val plain = m.decrypt(payload)
-        if (plain == null) {
-            // Coherency gap or malformed wire packet → ask peer to flush.
-            ccp?.sendResetRequest()
-            return
-        }
+        val plain = m.decrypt(payload) ?: return
         if (plain.isEmpty()) return
 
         // PFC: single-byte inner protocol if low bit of byte 0 is 1.
@@ -466,19 +464,6 @@ class PptpSession(
             if (plain.size < 2) return
             innerProto = ((plain[0].toInt() and 0xFF) shl 8) or (plain[1].toInt() and 0xFF)
             innerPayload = plain.copyOfRange(2, plain.size)
-        }
-
-        if (isKnownInnerProtocol(innerProto)) {
-            mppeConsecutiveBad = 0
-        } else {
-            mppeConsecutiveBad++
-            if (mppeConsecutiveBad >= mppeDesyncThreshold) {
-                Log.w(TAG, "MPPE recv desync detected ($mppeConsecutiveBad consecutive garbage decrypts) — triggering full re-sync")
-                m.resetForOurRequest()
-                ccp?.sendResetRequest()
-                mppeConsecutiveBad = 0
-                return
-            }
         }
 
         when (innerProto) {
