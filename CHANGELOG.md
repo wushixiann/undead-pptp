@@ -4,6 +4,46 @@
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-05-22
+
+兑现 v0.2.7 审查记录里"未动但应做"的四项里的三项（第 4 项 stalling UI 也一并修了）。
+
+### Security — LCP 拒绝 PAP 降级攻击
+
+`LcpStateMachine.handlePeerConfigureRequest` 原先 PAP 和 MS-CHAP-V2 都直接 ACK，给中间人攻击留了门：MITM 改写 server ConfReq 把 Auth-Protocol 改成 PAP → 客户端 ACK → 客户端发明文密码 → MITM 抓走。
+
+新策略：**只 ACK MS-CHAP-V2**。PAP / MS-CHAP-V1 / 未知值一律 NAK 反建议 MS-CHAP-V2。
+
+副作用警告：如果你的 pptpd 服务器配置 `refuse-mschap-v2` 或者只开了 PAP（pptpd 默认 `+chap +mschap` 是 MS-CHAP-V2，没问题），客户端会连不上。请在服务器端启用 MS-CHAP-V2，或者临时把 `LcpStateMachine.kt:165-168` 里 `AuthChoice.Pap` 移回 ackList 分支（**不推荐**——这等同于在不可信网络上明文传密码）。
+
+### Reliability — UdsBridge 上行队列 64 → 1024
+
+之前 outbound 容量 64，大流量上传（git push、相册上传）能在 ~50ms 内填满，触发 `IllegalStateException` → sendPpp catch + drop。丢的 GRE 帧由内层 TCP 重传补救，但要付 RTO（200ms+）和 cwnd backoff 的代价 → 吞吐崩塌。
+
+容量提到 1024 后，约 1.5MB 缓冲，足以吸收 Android 协程调度抖动。同时 received 也是 1024，对称。
+
+### UX — 服务器主动断开立刻上抛
+
+`PptpSession.connect` 在 `cc.openCall()` 成功后新增一个 `controlMonitorJob`，collect `ControlChannel.state`。一旦 state 变成 Closed 而 session phase 还在跑（不是用户主动断开），立刻 `fail(cc.lastError)`。
+
+之前服务器发 CDN（Call-Disconnect-Notify）或 TCP RST：
+- ControlChannel 内部 teardown → state=Closed → 但 PptpSession 不知道
+- 要等内层 PPP LCP echo 超时（60s+）才察觉
+- UI 期间显示 "Connected"，用户误以为还在线
+
+现在断开能在 < 1s 内体现到 UI 的 phase=Failed。
+
+### Refactored
+
+- `PptpSession` 新增 `controlMonitorJob` 字段，在 `teardownNetwork` 中正确 cancel
+- `LcpStateMachine` 顶部 KDoc 的 Auth-Protocol 策略段落更新为新语义并解释 trade-off
+
+### Note
+
+留作未来的事项（不在本版做）：
+- 自动重连（网络切换 / 服务器闪断后）
+- `PapAuth` 类和 `AuthChoice.Pap` enum 值现在是"理论上不可达"的死代码，但保留——重新允许 PAP 只需要修改 LCP 里一行，没必要因为本版的安全策略把整套实现删了
+
 ## [0.2.7] — 2026-05-22
 
 ### Removed — 首页调试入口

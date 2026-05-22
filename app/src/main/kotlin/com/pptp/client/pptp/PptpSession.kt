@@ -96,6 +96,7 @@ class PptpSession(
     private var session: SessionState? = null
     private var peerIpv4Int: Int = 0
     private var rxJob: Job? = null
+    private var controlMonitorJob: Job? = null
 
     private var papAuth: PapAuth? = null
     private var msChapAuth: MsChapV2Auth? = null
@@ -179,6 +180,21 @@ class PptpSession(
         }
         val s = cc.session ?: run { fail("缺少 SessionState"); return }
         session = s
+
+        // Watch the control channel so a server-initiated teardown (CDN /
+        // StopCCRQ / TCP RST while in CallUp) immediately surfaces as a
+        // session failure instead of waiting for the inner PPP LCP echo
+        // to time out 60s later.
+        controlMonitorJob = scope.launch {
+            cc.state.collect { st ->
+                if (st == ControlChannel.State.Closed &&
+                    _phase.value !in arrayOf(Phase.Idle, Phase.Disconnecting, Phase.Closed, Phase.Failed)
+                ) {
+                    val reason = cc.lastError.value ?: "控制通道已关闭"
+                    fail(reason)
+                }
+            }
+        }
 
         peerIpv4Int = try {
             withContext(Dispatchers.IO) { resolveIpv4(host) }
@@ -363,6 +379,8 @@ class PptpSession(
     }
 
     private fun teardownNetwork() {
+        controlMonitorJob?.cancel()
+        controlMonitorJob = null
         rxJob?.cancel()
         rxJob = null
         runCatching { bridge?.stop() }

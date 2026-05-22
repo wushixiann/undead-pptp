@@ -34,7 +34,13 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Peer-option policy (what we accept in their ConfReq):
  *   - MRU: accepted (we'll use it for our send size budget; clamp to 1500)
- *   - Auth-Protocol: PAP and MS-CHAP-V2 → Ack; MS-CHAP-V1 / others → Nak with MS-CHAP-V2
+ *   - Auth-Protocol: ONLY MS-CHAP-V2 → Ack. Everything else (PAP, MS-CHAP-V1,
+ *     unknown) → Nak counter-proposing MS-CHAP-V2.
+ *     PAP transmits the password in cleartext over PPP. A MITM on TCP 1723
+ *     can rewrite the server's ConfReq to propose PAP and capture the
+ *     password in the subsequent PAP exchange — accepting PAP silently
+ *     defeats the only authentication strength PPTP has left (MS-CHAP-V2's
+ *     12-hour-ish offline crack vs PAP's instant cleartext).
  *   - Magic-Number: accepted, recorded
  *   - PFC, ACFC: accepted (we tolerate compressed receive; we send uncompressed)
  *   - ACCM: accepted no-op (PPTP is synchronous, ACCM is meaningless)
@@ -160,14 +166,19 @@ class LcpStateMachine(
                 } else rejectList.add(o)
 
                 LcpOptionType.AUTHENTICATION_PROTOCOL -> when (LcpCodec.classifyAuth(o)) {
-                    AuthChoice.Pap, AuthChoice.MsChapV2 -> {
-                        negotiatedAuth = LcpCodec.classifyAuth(o)
+                    AuthChoice.MsChapV2 -> {
+                        negotiatedAuth = AuthChoice.MsChapV2
                         ackList.add(o)
                     }
-                    AuthChoice.MsChapV1, AuthChoice.Unknown -> {
-                        // Counter-propose MS-CHAP-V2.
-                        nakList.add(LcpCodec.authProtocolMsChapV2())
-                    }
+                    // PAP / MS-CHAP-V1 / anything else → NAK with counter-proposal
+                    // of MS-CHAP-V2. If the server is configured PAP-only it will
+                    // ConfReject our NAK or repeatedly re-propose PAP — connection
+                    // will fail and the user must enable MS-CHAP-V2 server-side.
+                    // This is intentional: silently accepting PAP would defeat the
+                    // only meaningful auth integrity PPTP has.
+                    AuthChoice.Pap,
+                    AuthChoice.MsChapV1,
+                    AuthChoice.Unknown -> nakList.add(LcpCodec.authProtocolMsChapV2())
                 }
 
                 LcpOptionType.MAGIC_NUMBER -> if (o.value.size == 4) {

@@ -64,7 +64,19 @@ class UdsBridge {
     private var server: LocalServerSocket? = null
     private var client: LocalSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val outbound = Channel<UdsFrame>(capacity = 64)
+
+    /**
+     * Outbound frame queue.
+     *
+     * Capacity 1024 (matched to [received]) — old 64 was too small for sustained
+     * upload bursts (`git push`, photo upload). On overflow, [send] throws and
+     * upstream sendPpp catches + drops the GRE frame; inner TCP then retransmits,
+     * but only after RTO (200ms+) and with cwnd backoff. Concretely: small queue
+     * = throughput collapses under sender-side memory pressure even when the
+     * actual UDS write loop is fast enough. Larger queue absorbs Android's
+     * coroutine scheduling jitter and keeps inner TCP healthy.
+     */
+    private val outbound = Channel<UdsFrame>(capacity = 1024)
     private var acceptJob: Job? = null
 
     /**
