@@ -16,11 +16,11 @@ val keystoreProps: Properties? = if (keystorePropsFile.exists()) {
 } else null
 
 android {
-    namespace = "com.pptp.client"
+    namespace = "me.jinsei.pptp"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.pptp.client"
+        applicationId = "me.jinsei.pptp"
         minSdk = 28
         targetSdk = 35
         versionCode = 28
@@ -48,6 +48,12 @@ android {
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+                // Explicit PKCS#12 — the format produced by both XCA exports
+                // and modern keytool (since JDK 9, default for new -genkey).
+                // AGP 8.x infers this from the file extension, but stating it
+                // explicitly avoids surprises on edge cases (e.g. .keystore
+                // extension with PKCS#12 content).
+                storeType = "PKCS12"
             }
         }
     }
