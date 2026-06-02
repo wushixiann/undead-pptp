@@ -48,7 +48,7 @@ object NetworkUtil {
             NetworkCapabilities.TRANSPORT_CELLULAR,
         )
         for (transport in priorityOrder) {
-            for (n in cm.allNetworks) {
+            for (n in allNetworksCompat(cm)) {
                 val caps = cm.getNetworkCapabilities(n) ?: continue
                 if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
                 if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
@@ -66,7 +66,7 @@ object NetworkUtil {
     fun listCandidates(context: Context): List<Candidate> {
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val out = mutableListOf<Candidate>()
-        for (n in cm.allNetworks) {
+        for (n in allNetworksCompat(cm)) {
             val caps = cm.getNetworkCapabilities(n) ?: continue
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
             val link = cm.getLinkProperties(n) ?: continue
@@ -82,4 +82,16 @@ object NetworkUtil {
         }
         return out
     }
+
+    /**
+     * `ConnectivityManager.allNetworks` is deprecated since API 31 in favor of
+     * `registerNetworkCallback` — but the callback API is asynchronous and
+     * requires maintaining a long-lived Set, which is heavy for our one-shot
+     * "pick underlay at session start" need. The deprecated property still
+     * works fine on every API level we target (28..35) and there's no plan
+     * to remove it. Isolate the @Suppress here so the call sites stay clean.
+     */
+    @Suppress("DEPRECATION")
+    private fun allNetworksCompat(cm: ConnectivityManager): Array<Network> =
+        cm.allNetworks
 }
