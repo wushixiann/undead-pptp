@@ -4,6 +4,17 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
+# AGP 8.x copies release artifacts to app/<variant>/ as a "convenience" mirror
+# of build/outputs/apk/<variant>/. We don't ship APKs through git — release
+# binaries belong on GitHub Releases / Gitea Releases. Everything below is
+# build output, NEVER source.
+app/release/
+app/debug/
+*.apk
+*.aab
+*.dm
+output-metadata.json
+
 # Android Studio / IntelliJ
 .idea/
 *.iml
